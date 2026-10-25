@@ -595,6 +595,38 @@ class TestMissingControlCharacteristic:
 
 class TestLegacyUartTransport:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", [3, 4, 5, 6])
+    @pytest.mark.parametrize("sensitivity", [0, 50, 100])
+    async def test_music_modes_use_h6104_frame(self, mode, sensitivity):
+        device = GoveeBLEDevice(_make_ble_device(), legacy_uart=True)
+        with patch.object(device, "_write", AsyncMock()) as write:
+            await device.set_music_mode(mode, sensitivity)
+        frame = write.call_args.args[0]
+        assert frame[:5] == bytes([0x33, 0x05, 1, mode, sensitivity])
+        assert len(frame) == 20
+        checksum = 0
+        for value in frame[:-1]:
+            checksum ^= value
+        assert frame[-1] == checksum
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode,sensitivity", [(1, 50), (2, 50), (7, 50), (3, -1), (3, 101)])
+    async def test_unsupported_music_parameters_do_not_write(self, mode, sensitivity):
+        device = GoveeBLEDevice(_make_ble_device(), legacy_uart=True)
+        with patch.object(device, "_write", AsyncMock()) as write:
+            with pytest.raises(ValueError):
+                await device.set_music_mode(mode, sensitivity)
+        write.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_music_does_not_change_a_modern_profile(self):
+        device = GoveeBLEDevice(_make_ble_device())
+        with patch.object(device, "_write", AsyncMock()) as write:
+            with pytest.raises(BleakError, match="H6104"):
+                await device.set_music_mode(3)
+        write.assert_not_awaited()
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("power_on", [False, True])
     async def test_h6104_subscribes_and_writes_plaintext_to_ffe1(self, power_on):
         device = GoveeBLEDevice(_make_ble_device(name="ihoment_H6104_TEST"), legacy_uart=True)

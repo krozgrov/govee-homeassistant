@@ -225,6 +225,15 @@ DreamView switch state. Brightness changes leave TV mode selected.
 Color temperature, other effects and camera calibration remain on the existing
 Wi-Fi/cloud paths.
 
+The H6104 **Music mode** switch, **Music mode** dropdown and **Music sensitivity**
+slider now send automatic-color music modes over FFE1 BLE as well. The advertised
+modes are Rhythm, Rolling, Energic and Spectrum (codes 3–6). Turning music off
+restores a solid color over BLE. Music and DreamView clear each other's switch
+state; choosing a solid color clears both. The music frame is taken from the
+app-derived H6104 `SubModeMusic` reference (`33 05 01 code sensitivity`), but
+physical music-mode operation still needs testing. Fixed-color and unsupported
+music variants retain their previous fallback path.
+
 A live GATT connection stays available even when the light stops advertising.
 Disconnected devices still require fresh advertisements, and real write errors
 still make BLE unavailable. This avoids the previous three-minute

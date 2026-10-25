@@ -493,6 +493,20 @@ class GoveeBLEDevice:
             raise ValueError("TV area must be 0/1 and sensitivity must be 0-100")
         await self._write(_build_frame(LedPacketCmd.COLOR, [0x00, 0x00, area, sensitivity]))
 
+    async def set_music_mode(self, mode: int, sensitivity: int = 50) -> None:
+        """Select an H6104 automatic-color music effect over its UART.
+
+        H6104 SubModeMusic: 33 05 01 code sensitivity. Codes 1/2 additionally
+        require RGB; those fixed-color variants are deliberately not exposed.
+        Codes 3-6 are the automatic modes advertised by this H6104's API.
+        https://github.com/Brady-Woods/govee-ble-local/blob/535104e8e107b35757e6f90d8bbb2cadf599985c/spec/docs/OPCODE_COVERAGE.md
+        """
+        if not self._legacy_uart:
+            raise BleakError("Music mode is only implemented for the H6104 UART profile")
+        if mode not in (3, 4, 5, 6) or not 0 <= sensitivity <= 100:
+            raise ValueError("Unsupported H6104 music mode or sensitivity")
+        await self._write(_build_frame(LedPacketCmd.COLOR, [0x01, mode, sensitivity]))
+
     async def set_rgb(self, red: int, green: int, blue: int) -> None:
         """Set RGB color.
 

@@ -5873,7 +5873,8 @@ class GoveeCoordinator(DataUpdateCoordinator[dict[str, GoveeDeviceState]]):
     async def _try_ble_command(self, device_id: str, command: DeviceCommand) -> bool:
         """Attempt to send a command via BLE. Returns True on success.
 
-        Only power, brightness, and RGB color commands are BLE-capable.
+        Power, brightness, and RGB are shared. The opted-in H6104 additionally
+        handles TV mode and automatic-color music modes over its UART.
         Scenes, color_temp, work modes, etc. fall through to REST.
         """
         ble_device = self._ble_devices.get(device_id)
@@ -5897,6 +5898,14 @@ class GoveeCoordinator(DataUpdateCoordinator[dict[str, GoveeDeviceState]]):
                     command.color.g,
                     command.color.b,
                 )
+            elif isinstance(command, MusicModeCommand) and ble_sku == "H6104":
+                # The UI advertises auto-color codes 3-6. Preserve the existing
+                # fallback for fixed-color or unknown variants rather than
+                # silently discarding their additional command parameters.
+                if command.auto_color != 1 or command.music_mode not in (3, 4, 5, 6):
+                    return False
+                await ble_device.set_music_mode(command.music_mode, command.sensitivity)
+                detail = f"H6104 music mode={command.music_mode} sensitivity={command.sensitivity}"
             elif (
                 isinstance(command, ToggleCommand)
                 and command.toggle_instance == INSTANCE_DREAMVIEW
@@ -5995,6 +6004,20 @@ class GoveeCoordinator(DataUpdateCoordinator[dict[str, GoveeDeviceState]]):
         if not device:
             _LOGGER.error("Unknown device for music mode: %s", device_id)
             return False
+
+        if device.sku == "H6104" and device_id in self._ble_devices:
+            if enabled:
+                if music_mode == 1:
+                    modes = [
+                        opt["value"] for opt in device.get_music_mode_options() if opt.get("value") in (3, 4, 5, 6)
+                    ]
+                    music_mode = modes[0] if modes else 3
+                return await self.async_control_device(
+                    device_id, MusicModeCommand(music_mode=music_mode, sensitivity=sensitivity, auto_color=1)
+                )
+            state = self._states.get(device_id)
+            color = (state.last_color or state.color) if state else None
+            return await self.async_control_device(device_id, ColorCommand(color=color or RGBColor(255, 255, 255)))
 
         # Try REST API first for devices with STRUCT music mode capability
         if device.has_struct_music_mode:

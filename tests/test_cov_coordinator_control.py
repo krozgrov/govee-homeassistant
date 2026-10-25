@@ -437,6 +437,30 @@ class TestH6104BleTier:
     """Route commands after a real H6104 enrollment; only the GATT write is mocked."""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", [1, 3])
+    async def test_music_on_and_off_use_ble_and_update_mode_switches(self, monkeypatch, mode):
+        coord = _coordinator()
+        state = _add(coord, _device(sku="H6104", caps=(_POWER, _RGB, _MUSIC_STRUCT)))
+        state.dreamview_enabled = True
+        state.last_color = RGBColor(10, 20, 30)
+        ble = GoveeBLEDevice(MagicMock(), legacy_uart=True)
+        write = AsyncMock()
+        monkeypatch.setattr(ble, "_write", write)
+        monkeypatch.setattr(coord_mod, "HAS_BLUETOOTH", True)
+        coord._ble_devices[DEV] = ble
+        coord._transport.record_success(DEV, "ble")
+        assert await coord.async_send_music_mode(DEV, True, sensitivity=70, music_mode=mode) is True
+        assert write.call_args.args[0][:5] == bytes.fromhex("3305010346")
+        assert state.music_mode_enabled is True
+        assert state.music_mode_name == "Rhythm"
+        assert state.music_sensitivity == 70
+        assert state.dreamview_enabled is False
+        assert await coord.async_send_music_mode(DEV, False) is True
+        assert write.call_args.args[0][:6] == bytes.fromhex("3305020a141e")
+        assert state.music_mode_enabled is False
+        coord._api_client.control_device.assert_not_awaited()
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "command,head",
         [
@@ -445,6 +469,8 @@ class TestH6104BleTier:
             (BrightnessCommand(brightness=128), bytes.fromhex("330480")),
             (ColorCommand(color=RGBColor(r=255, g=0, b=64)), bytes.fromhex("330502ff0040")),
             (ColorTempCommand(kelvin=3000), None),
+            (MusicModeCommand(music_mode=5, sensitivity=80), bytes.fromhex("3305010550")),
+            (MusicModeCommand(music_mode=5, sensitivity=80, auto_color=0, rgb=0xFF0000), None),
             (ToggleCommand(toggle_instance=INSTANCE_DREAMVIEW, enabled=True), bytes.fromhex("330500000132")),
             (ToggleCommand(toggle_instance=INSTANCE_DREAMVIEW, enabled=False), bytes.fromhex("330502ffffff")),
         ],
