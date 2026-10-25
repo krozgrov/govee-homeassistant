@@ -265,8 +265,43 @@ clears that idle allowance; a real connection/write failure retains the usual
 failure gate until fresh discovery. This also keeps controls actionable when
 the cloud reports the light offline. H6104 DreamView never falls back to the
 unsupported cloud `dreamViewToggle`: a local failure reports the BLE reason.
-This test build is identified by `h6104_ble_build: 2026.10.25.10` in downloaded
+This test build is identified by `h6104_ble_build: 2026.10.25.11` in downloaded
 diagnostics, to distinguish packages that share the upstream manifest version.
+
+### Update device Wi-Fi over Bluetooth (experimental)
+
+This test build adds **Govee → Configure → Update device Wi-Fi (experimental)**.
+Choose a device and enter the name and password of a **visible 2.4 GHz network**.
+Close the Govee app and keep a connectable Bluetooth adapter or active ESPHome
+proxy within range. For an open network, leave the password empty. Credentials
+are used for this operation only; they are not saved in integration options,
+command history or diagnostics. Enter them again for a deliberate retry.
+
+The implementation shares the device's existing BLE transport: standard GATT,
+encrypted GATT, or the H6104's legacy UART. The picker currently offers the
+integration's supported **H6199 and H1270** profiles, and **H6104** when its
+experimental Bluetooth option is enabled. The radio must have been discovered
+and enrolled. BLE visibility by itself does not establish compatibility; other
+models need a supported protocol profile before being offered. Wi-Fi setup is
+**not yet hardware-verified on these models**, even where basic BLE control is.
+
+Setup holds the connection for the full transfer and then disconnects so the
+phone app can reconnect. The result distinguishes settings **sent without an
+acknowledgment**, **accepted by the device**, and a **device-reported Wi-Fi
+connection**. Check that the device actually comes online on your network;
+accepting credentials alone is not a successful network connection. Errors do
+not trigger retries or cloud fallback. Existing cloud credentials and options
+remain unchanged.
+
+Some device protocols send network credentials without encryption over
+Bluetooth. This experimental implementation uses UTC (zero) for the provisioning
+payload's time-zone fields, since negative offsets have not been established.
+Hidden networks and raw 64-character WPA keys are not supported. Device firmware
+may require a different provisioning sequence, in which case use the Govee app.
+This recovery option does not establish or fix the cause of Wi-Fi disconnections.
+
+Protocol sources: [Wi-Fi transfer layout and timing](https://github.com/damient/govee-toolkit/blob/ceef296f6382881c5f07698d78fb5719ebca6686/docs/protocol/ble.md#4-wi-fi-provisioning--protype-0xa1-commandtype-0x11)
+and [GATT/UART profiles and Wi-Fi notifications](https://github.com/Brady-Woods/govee-ble-local/blob/535104e8e107b35757e6f90d8bbb2cadf599985c/spec/docs/GOVEE_BLE_GATT_PROTOCOL.md).
 
 ### H6104 Bluetooth status readback (experimental)
 

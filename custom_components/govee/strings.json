@@ -89,7 +89,8 @@
         "title": "Govee options",
         "menu_options": {
           "general": "General settings",
-          "kettle_slots": "Kettle slot labels"
+          "kettle_slots": "Kettle slot labels",
+          "wifi_setup": "Update device Wi-Fi (experimental)"
         }
       },
       "general": {
@@ -157,6 +158,15 @@
         "data_description": {
           "segment_mode": "Disabled creates no segment entities, grouped creates one entity for all segments, individual creates one entity per segment, and both creates the grouped entity alongside the individual ones."
         }
+      },
+      "wifi_setup": {
+        "title": "Update device Wi-Fi",
+        "description": "Send settings for a visible 2.4 GHz network over Bluetooth. Close the Govee app and keep the device within Bluetooth range. This experimental sequence needs per-model hardware verification and may interrupt its existing connection. Some device protocols send the Wi-Fi password without encryption over Bluetooth. Credentials are used once and are not saved by this integration. Provisioning uses UTC for the device time-zone fields. Allow up to 30 seconds; verify that the device comes back online afterward.",
+        "data": {
+          "device_id": "Govee device",
+          "ssid": "Wi-Fi network name",
+          "wifi_password": "Wi-Fi password (leave empty for an open network)"
+        }
       }
     },
     "error": {
@@ -164,10 +174,17 @@
       "unknown_lan_device": "A device_id=ip override names a device that is not on this Govee account. Copy the device ID exactly as it appears in the device's diagnostics (for example AA:BB:CC:DD:EE:FF:00:11).",
       "duplicate_slot_label": "Two slots have the same label.",
       "reserved_slot_label": "This label is a built-in mode, Manual or Off.",
-      "slot_label_too_long": "Use at most 40 characters."
+      "slot_label_too_long": "Use at most 40 characters.",
+      "wifi_unavailable": "This device is no longer available. Reopen Configure.",
+      "wifi_invalid_credentials": "Use a network name of 1–32 UTF-8 bytes and a password of 8–63 UTF-8 bytes, or leave the password empty for an open network. NUL characters are not supported.",
+      "wifi_setup_failed": "Wi-Fi setup failed. Confirm a compatible Bluetooth radio has been discovered, the Govee app is closed, and the network settings are correct. Credentials were not saved; re-enter them to retry."
     },
     "abort": {
-      "kettle_unavailable": "The kettle is no longer available. Open the options again."
+      "kettle_unavailable": "The kettle is no longer available. Open the options again.",
+      "wifi_unavailable": "No compatible BLE devices are available. Load the integration and discover a supported Bluetooth radio first. H6104 also requires experimental Bluetooth control to be enabled in General settings.",
+      "wifi_connected": "The device reported a successful Wi-Fi connection. Verify it is reachable on your network.",
+      "wifi_accepted": "The device accepted the Wi-Fi settings, but did not confirm a network connection. Check whether it comes online before retrying.",
+      "wifi_sent": "Wi-Fi settings were sent, but the device did not acknowledge them or confirm a connection. Check whether it comes online; this firmware may require a different setup sequence."
     }
   },
   "selector": {

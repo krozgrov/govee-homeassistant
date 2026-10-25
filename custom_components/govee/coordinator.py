@@ -40,6 +40,7 @@ from .api import (
     GoveeRateLimitError,
 )
 from .api.ble_status import H6104Report
+from .api.ble_wifi import supports_wifi_setup
 from .api.auth import GoveeAuthClient, _derive_client_id
 from .api.openapi_events import GoveeOpenApiEventClient
 from .ble_passthrough import BlePassthroughManager
@@ -77,6 +78,7 @@ from .api.lan_client import (
 )
 from .api.lan_control import command_to_lan, lan_brightness_to_device
 from .const import (
+    CONF_ENABLE_H6104_BLE,
     CONF_API_TEMPERATURE_UNIT,
     CONF_EMAIL,
     CONF_CONFIRM_COMMANDS,
@@ -6286,6 +6288,23 @@ class GoveeCoordinator(DataUpdateCoordinator[dict[str, GoveeDeviceState]]):
             self.clear_music_mode(device_id)
 
         return success
+
+    async def async_provision_wifi(self, device_id: str, ssid: str, password: str) -> str:
+        """One-shot local recovery for enrolled, compatible BLE device profiles.
+
+        The same eligibility rules as local control apply, including H6104's
+        opt-in. Cloud-offline state does not block this explicit recovery.
+        """
+        device = self._devices.get(device_id)
+        if device is None or not supports_wifi_setup(
+            device.sku, experimental_h6104=self._config_entry.options.get(CONF_ENABLE_H6104_BLE, False)
+        ):
+            raise ValueError("This device has no supported BLE control profile")
+        self._ble_handler.enroll_from_cache()
+        client = self._ble_devices.get(device_id)
+        if client is None:
+            raise ValueError("The device's Bluetooth radio has not been discovered")
+        return await client.async_provision_wifi(ssid, password)
 
     def h6104_tv_settings(self, device_id: str) -> tuple[int, int]:
         """Return desired area/sensitivity; entity restoration persists them."""

@@ -66,6 +66,7 @@ from .ble_crypto import (
     async_supports_encryption,
 )
 from .ble_packet import build_packet
+from .ble_wifi import wifi_frames
 from .ble_status import H6104Report, decode_h6104_status
 
 if TYPE_CHECKING:
@@ -284,6 +285,8 @@ class GoveeBLEDevice:
         self._idle_disconnected = False
         self._report_callbacks: list[Callable[[H6104Report], None]] = []
         self._pending_status: tuple[bytes, asyncio.Future[H6104Report]] | None = None
+        self._wifi_replies: dict[bytes, asyncio.Future[bytes]] = {}
+        self._wifi_echoes: set[bytes] = set()
         self._power_read_validated = False
         self._status_frames: deque[str] = deque(maxlen=12)
         self._status_candidates: deque[str] = deque(maxlen=12)
@@ -351,6 +354,24 @@ class GoveeBLEDevice:
         frame = bytes(data)
         if len(frame) != 20:
             return
+        if frame in self._wifi_echoes:
+            return
+        wifi_reply = self._wifi_replies.get(frame[:2])
+        if wifi_reply is not None and not wifi_reply.done():
+            checksum = 0
+            for value in frame:
+                checksum ^= value
+            if checksum == 0:
+                # AAAB's all-zero reply is indistinguishable from an echo.
+                # A111 echoes carry a count/data or FF, not a status-only body.
+                if frame[:2] == b"\xaa\xab":
+                    if frame != build_packet([0xAA, 0xAB]):
+                        wifi_reply.set_result(frame)
+                elif frame[2] != 0xFF and not any(frame[3:19]):
+                    wifi_reply.set_result(frame)
+            return
+        if not self._legacy_uart:
+            return  # status layouts remain device-specific
         if (frame[0] == 0xAA and frame[1] in (1, 4, 5)) or frame[:2] == bytes([0xEE, 0x20]):
             # Keep bounded evidence even for echoes/unknown layouts, while
             # excluding device-info, Wi-Fi/pairing and arbitrary notifications.
@@ -375,6 +396,91 @@ class GoveeBLEDevice:
             pending[1].set_result(report)
         else:
             self._emit_report(report)
+
+    async def async_provision_wifi(self, ssid: str, password: str) -> str:
+        """Send credentials atomically; distinguish transfer from connection.
+
+        No credential frames enter command history, status evidence or logs.
+        Uses this device's existing UART, plaintext or encrypted transport.
+        Never retry automatically or fall back to a cloud command.
+        """
+        wifi_frames(ssid, password)  # validate before opening a connection
+        async with self._lock:
+            self._cancel_idle_disconnect()
+            self._idle_disconnected = False
+            client = None
+            woke = False
+            try:
+                client = await self._ensure_connected()
+                if client.services.get_characteristic(self._write_uuid) is None:
+                    raise BleakError("BLE control characteristic unavailable")
+                if not self._legacy_uart and self._session is None:
+                    await client.start_notify(
+                        READ_CHARACTERISTIC_UUID, lambda _sender, data: self._on_uart_notification(client, data)
+                    )
+
+                async def send(frame: bytes) -> None:
+                    if not client.is_connected or self._client is not client:
+                        raise BleakError("Disconnected during Wi-Fi setup")
+                    if self._session is not None:
+                        frame = self._session.wrap(frame)
+                    await client.write_gatt_char(self._write_uuid, frame, response=False)
+
+                loop = asyncio.get_running_loop()
+                info: asyncio.Future[bytes] = loop.create_future()
+                self._wifi_replies[b"\xaa\xab"] = info
+                await send(build_packet([0xAA, 0xAB]))
+                api_type, hidden_supported = 0, False
+                try:
+                    reply = await asyncio.wait_for(info, 1.5)
+                    api_type, hidden_supported = reply[2], bool(reply[3])
+                except TimeoutError:
+                    pass  # old firmware has no dynamic API block
+                frames = wifi_frames(ssid, password, api_type=api_type, hidden_supported=hidden_supported)
+                self._wifi_echoes = set(frames)
+                connected: asyncio.Future[bytes] = loop.create_future()
+                accepted: asyncio.Future[bytes] = loop.create_future()
+                # Attempt release even if the wake write raises after transmission.
+                woke = True
+                await send(build_packet([0x33, 0x17, 1]))
+                await asyncio.sleep(3)
+                for frame in frames:
+                    if frame[2] == 0xFF:
+                        # Only the closing frame can trigger a result. Data
+                        # packet indexes can otherwise look like status codes.
+                        self._wifi_replies[b"\xee\x11"] = connected
+                        self._wifi_replies[b"\xa1\x11"] = accepted
+                    await send(frame)
+                    await asyncio.sleep(0.3)
+                await send(build_packet([0x33, 0x17, 0]))
+                woke = False
+                try:
+                    reply = await asyncio.wait_for(asyncio.shield(connected), 20)
+                    if reply[2] != 0:
+                        raise BleakError("Device reported Wi-Fi connection failure")
+                    return "wifi_connected"
+                except TimeoutError:
+                    if accepted.done():
+                        if accepted.result()[2] != 0:
+                            raise BleakError("Device refused Wi-Fi settings")
+                        return "wifi_accepted"
+                    return "wifi_sent"
+            except (BleakError, TimeoutError, OSError, ValueError):
+                # BLE backends may put outgoing bytes into exception text.
+                raise BleakError("Wi-Fi setup failed; check Bluetooth range and network settings") from None
+            finally:
+                if woke and client is not None and client.is_connected:
+                    with contextlib.suppress(Exception):
+                        await send(build_packet([0x33, 0x17, 0]))
+                for future in self._wifi_replies.values():
+                    if not future.done():
+                        future.cancel()
+                    elif not future.cancelled():
+                        future.exception()
+                self._wifi_replies.clear()
+                self._wifi_echoes.clear()
+                # Give the app back its slot immediately after the operation.
+                await self._disconnect_client()
 
     async def async_read_status(self) -> list[H6104Report]:
         """Read power, raw brightness and mode without changing the light.
@@ -474,6 +580,9 @@ class GoveeBLEDevice:
         self._idle_disconnected = False
         if self._pending_status is not None and not self._pending_status[1].done():
             self._pending_status[1].set_exception(BleakError("Disconnected during status read"))
+        for future in self._wifi_replies.values():
+            if not future.done():
+                future.set_exception(BleakError("Disconnected during Wi-Fi setup"))
         self._client = None
         # Frame counters restart at 1 on the next connection, so reusing this
         # session would encrypt with nonces the device has already seen.
@@ -575,7 +684,10 @@ class GoveeBLEDevice:
                     )
             elif await async_supports_encryption(self._client):
                 self._session = await async_establish_session(
-                    self._client, WRITE_CHARACTERISTIC_UUID, READ_CHARACTERISTIC_UUID
+                    self._client,
+                    WRITE_CHARACTERISTIC_UUID,
+                    READ_CHARACTERISTIC_UUID,
+                    on_frame=lambda data, client=self._client: self._on_uart_notification(client, bytearray(data)),
                 )
                 _LOGGER.debug("Negotiated encrypted BLE session with %s", self.address)
         except Exception:

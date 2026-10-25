@@ -24,6 +24,9 @@ from homeassistant.data_entry_flow import AbortFlow
 from homeassistant.helpers import config_validation as cv, device_registry as dr, issue_registry as ir
 from homeassistant.helpers.service_info.bluetooth import BluetoothServiceInfo
 from homeassistant.helpers.selector import (
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
     SelectSelector,
     SelectSelectorConfig,
     SelectSelectorMode,
@@ -791,10 +794,72 @@ class GoveeOptionsFlow(OptionsFlow):
         self,
         user_input: dict[str, Any] | None = None,
     ) -> ConfigFlowResult:
-        """Open the options: a menu when an H7175 kettle has custom slots, else the general settings."""
-        if user_input is None and self._kettles_with_slots():
-            return self.async_show_menu(step_id="init", menu_options=["general", "kettle_slots"])
+        """Open a menu when device actions are available, otherwise general settings."""
+        if user_input is None:
+            menu = ["general"]
+            if self._kettles_with_slots():
+                menu.append("kettle_slots")
+            if self._wifi_devices():
+                menu.append("wifi_setup")
+            if len(menu) > 1:
+                return self.async_show_menu(step_id="init", menu_options=menu)
         return await self.async_step_general(user_input)
+
+    def _wifi_devices(self) -> list[GoveeDevice]:
+        """Offer compatible BLE profiles; advertising alone proves nothing."""
+        from .api.ble_wifi import supports_wifi_setup
+
+        return [
+            device
+            for device in self._coordinator_devices()
+            if supports_wifi_setup(
+                device.sku, experimental_h6104=self.config_entry.options.get(CONF_ENABLE_H6104_BLE, False)
+            )
+        ]
+
+    async def async_step_wifi_setup(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """One-shot credentials, never saved to the config entry or options."""
+        devices = {device.device_id: device for device in self._wifi_devices()}
+        if not devices:
+            return self.async_abort(reason="wifi_unavailable")
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            from .api.ble_wifi import wifi_frames
+
+            if user_input["device_id"] not in devices:
+                errors["base"] = "wifi_unavailable"
+            else:
+                try:
+                    wifi_frames(user_input["ssid"], user_input["wifi_password"])
+                except ValueError:
+                    errors["base"] = "wifi_invalid_credentials"
+                else:
+                    try:
+                        result = await self.config_entry.runtime_data.async_provision_wifi(
+                            user_input["device_id"], user_input["ssid"], user_input["wifi_password"]
+                        )
+                    except Exception:
+                        # Do not log backend exception text or retain submitted
+                        # values: a backend exception can contain credential bytes.
+                        errors["base"] = "wifi_setup_failed"
+                    else:
+                        return self.async_abort(reason=result)
+        return self.async_show_form(
+            step_id="wifi_setup",
+            errors=errors,
+            data_schema=vol.Schema(
+                {
+                    vol.Required("device_id"): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[{"value": did, "label": device.name} for did, device in devices.items()],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                    vol.Required("ssid"): str,
+                    vol.Required("wifi_password"): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
+                }
+            ),
+        )
 
     async def async_step_general(
         self,
