@@ -416,6 +416,20 @@ class GoveeBLEDevice:
         """
         async with self._lock:
             client = await self._ensure_connected()
+            if client.services.get_characteristic(WRITE_CHARACTERISTIC_UUID) is None:
+                # Expose structure only, never characteristic values. Older
+                # H6104 firmware can connect without exposing our control UUID;
+                # its actual GATT layout is needed before selecting a protocol.
+                services = [
+                    f"{service.uuid}: "
+                    + ", ".join(f"{char.uuid} ({'/'.join(char.properties)})" for char in service.characteristics)
+                    for service in client.services
+                ]
+                raise BleakError(
+                    f"Control characteristic {WRITE_CHARACTERISTIC_UUID} was not found. "
+                    f"Discovered GATT services: {'; '.join(services) or 'none'}. "
+                    "No BLE command was sent; no alternate characteristic was tried."
+                )
             if self._session is not None:
                 frame = self._session.wrap(frame)
             await client.write_gatt_char(WRITE_CHARACTERISTIC_UUID, frame, response=False)

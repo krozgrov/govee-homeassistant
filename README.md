@@ -215,6 +215,15 @@ frames cannot trigger it. If the light does not react, disable this option to
 restore normal routing and collect debug logs/GATT service details before trying
 another protocol. Repeat the test after reconnecting Wi-Fi and after restarting HA.
 
+The initial H6104 field test failed before sending a BLE command: the discovered
+GATT database did not contain the usual `00010203-0405-0607-0809-0a0b0c0d2b11`
+control characteristic. This is not evidence that the light ignored the power
+frame. This branch now includes discovered service UUIDs, characteristic UUIDs
+and their properties in that failure's `recent_commands` detail. After installing
+the diagnostic build, reload the integration, try one power command, then download
+Govee integration diagnostics. These details reveal the exposed GATT structure
+without reading characteristic values or writing to guessed alternate endpoints.
+
 Commands always use optimistic updates, so the UI reflects your action immediately and reconciles with the next confirmed state. MQTT publishes are acknowledged by the broker (QoS 1); an unacknowledged send falls through to REST rather than being reported as success.
 
 ### Confirming light commands (`confirm_commands`)

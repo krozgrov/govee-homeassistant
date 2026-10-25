@@ -32,6 +32,7 @@ from custom_components.govee.api.ble import (
     _build_rgb_single_frame,
 )
 from custom_components.govee.api.ble_crypto import GoveeBLESession
+from bleak.exc import BleakError
 
 
 @pytest.fixture(autouse=True)
@@ -557,6 +558,38 @@ def _install_fake_client(device: GoveeBLEDevice) -> MagicMock:
     fake_client.disconnect = AsyncMock()
     device._client = fake_client
     return fake_client
+
+
+class TestMissingControlCharacteristic:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("empty_services", [False, True])
+    async def test_reports_gatt_structure_without_writing_or_updating_state(self, empty_services):
+        device = GoveeBLEDevice(_make_ble_device(name="ihoment_H6104_TEST"))
+        client = MagicMock()
+        client.write_gatt_char = AsyncMock()
+        client.services.get_characteristic.return_value = None
+        service = MagicMock()
+        service.uuid = "00001812-0000-1000-8000-00805f9b34fb"
+        characteristic = MagicMock()
+        characteristic.uuid = "00002a4d-0000-1000-8000-00805f9b34fb"
+        characteristic.properties = ["read", "notify"]
+        service.characteristics = [characteristic]
+        client.services.__iter__.return_value = iter([] if empty_services else [service])
+        with patch.object(device, "_ensure_connected", AsyncMock(return_value=client)):
+            with pytest.raises(BleakError) as exc:
+                await device.turn_on()
+        message = str(exc.value)
+        assert WRITE_CHARACTERISTIC_UUID in message
+        assert "No BLE command was sent" in message
+        if empty_services:
+            assert "services: none" in message
+        else:
+            assert service.uuid in message
+            assert characteristic.uuid in message
+            assert "read/notify" in message
+        client.write_gatt_char.assert_not_awaited()
+        client.read_gatt_char.assert_not_called()
+        assert device.state.power is None
 
 
 class TestTurnOnOff:
