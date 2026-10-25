@@ -75,6 +75,9 @@ _LOGGER = logging.getLogger(__name__)
 # GATT characteristic UUIDs (same as Beshelmek/govee_ble_lights)
 WRITE_CHARACTERISTIC_UUID = "00010203-0405-0607-0809-0a0b0c0d2b11"
 READ_CHARACTERISTIC_UUID = "00010203-0405-0607-0809-0a0b0c0d2b10"
+# App-derived H6104/H6101 UART endpoint, also present in the H6104 field GATT dump.
+# https://github.com/Brady-Woods/govee-ble-local/blob/535104e8e107b35757e6f90d8bbb2cadf599985c/spec/docs/GOVEE_BLE_GATT_PROTOCOL.md#23-alternate-uart-service-a-few-devices
+LEGACY_UART_CHARACTERISTIC_UUID = "0000ffe1-0000-1000-8000-00805f9b34fb"
 
 # Advertising name prefixes used for Bluetooth discovery (manifest.json matchers)
 BLE_DISCOVERY_NAMES: tuple[str, ...] = ("Govee_", "ihoment_", "GBK_")
@@ -246,6 +249,7 @@ class GoveeBLEDevice:
         ble_device: BLEDevice,
         refresh_ble_device: Callable[[], BLEDevice | None] | None = None,
         segmented: bool = False,
+        legacy_uart: bool = False,
     ) -> None:
         """Initialize the device wrapper.
 
@@ -258,10 +262,13 @@ class GoveeBLEDevice:
                 Optional for tests.
             segmented: True if the device uses the segmented color encoding
                 (H6053, H6072, H6102, H6199-class RGBIC strips).
+            legacy_uart: Use H6104's plaintext FFE1 write/notify endpoint.
         """
         self._ble_device = ble_device
         self._refresh_ble_device = refresh_ble_device
         self._segmented = segmented
+        self._legacy_uart = legacy_uart
+        self._write_uuid = LEGACY_UART_CHARACTERISTIC_UUID if legacy_uart else WRITE_CHARACTERISTIC_UUID
         self._client: BleakClient | None = None
         # Set only for devices speaking the encrypted protocol, and only for
         # as long as the connection that negotiated it lives.
@@ -389,7 +396,14 @@ class GoveeBLEDevice:
         )
 
         try:
-            if await async_supports_encryption(self._client):
+            if self._legacy_uart:
+                # On H6104 the 2b12 characteristic belongs to OTA service 1912,
+                # not control service 1910: it is not encryption-version data.
+                # Subscribe on the UART as the app does, retaining optimistic
+                # state until the notification format has been verified.
+                if self._client.services.get_characteristic(self._write_uuid) is not None:
+                    await self._client.start_notify(self._write_uuid, lambda _sender, _data: None)
+            elif await async_supports_encryption(self._client):
                 self._session = await async_establish_session(
                     self._client, WRITE_CHARACTERISTIC_UUID, READ_CHARACTERISTIC_UUID
                 )
@@ -416,7 +430,7 @@ class GoveeBLEDevice:
         """
         async with self._lock:
             client = await self._ensure_connected()
-            if client.services.get_characteristic(WRITE_CHARACTERISTIC_UUID) is None:
+            if client.services.get_characteristic(self._write_uuid) is None:
                 # Expose structure only, never characteristic values. Older
                 # H6104 firmware can connect without exposing our control UUID;
                 # its actual GATT layout is needed before selecting a protocol.
@@ -426,13 +440,13 @@ class GoveeBLEDevice:
                     for service in client.services
                 ]
                 raise BleakError(
-                    f"Control characteristic {WRITE_CHARACTERISTIC_UUID} was not found. "
+                    f"Control characteristic {self._write_uuid} was not found. "
                     f"Discovered GATT services: {'; '.join(services) or 'none'}. "
                     "No BLE command was sent; no alternate characteristic was tried."
                 )
             if self._session is not None:
                 frame = self._session.wrap(frame)
-            await client.write_gatt_char(WRITE_CHARACTERISTIC_UUID, frame, response=False)
+            await client.write_gatt_char(self._write_uuid, frame, response=False)
 
     # ------------------------------------------------------------------ #
     # High-level command API

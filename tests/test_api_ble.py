@@ -18,6 +18,7 @@ import pytest
 
 from custom_components.govee.api.ble import (
     BLE_DISCOVERY_NAMES,
+    LEGACY_UART_CHARACTERISTIC_UUID,
     READ_CHARACTERISTIC_UUID,
     SEGMENTED_MODELS,
     WRITE_CHARACTERISTIC_UUID,
@@ -589,6 +590,52 @@ class TestMissingControlCharacteristic:
             assert "read/notify" in message
         client.write_gatt_char.assert_not_awaited()
         client.read_gatt_char.assert_not_called()
+        assert device.state.power is None
+
+
+class TestLegacyUartTransport:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("power_on", [False, True])
+    async def test_h6104_subscribes_and_writes_plaintext_to_ffe1(self, power_on):
+        device = GoveeBLEDevice(_make_ble_device(name="ihoment_H6104_TEST"), legacy_uart=True)
+        client = MagicMock()
+        client.start_notify = AsyncMock()
+        client.write_gatt_char = AsyncMock()
+        with (
+            patch("custom_components.govee.api.ble.close_stale_connections_by_address", AsyncMock()),
+            patch("custom_components.govee.api.ble.establish_connection", AsyncMock(return_value=client)),
+            patch("custom_components.govee.api.ble.async_supports_encryption", AsyncMock()) as probe,
+        ):
+            await (device.turn_on() if power_on else device.turn_off())
+            # Reused connections do not subscribe a second time.
+            await device.set_brightness(128)
+        client.start_notify.assert_awaited_once()
+        assert client.start_notify.call_args.args[0] == LEGACY_UART_CHARACTERISTIC_UUID
+        client.write_gatt_char.assert_any_await(
+            LEGACY_UART_CHARACTERISTIC_UUID, _build_power_frame(power_on), response=False
+        )
+        client.write_gatt_char.assert_any_await(
+            LEGACY_UART_CHARACTERISTIC_UUID, _build_brightness_frame(128), response=False
+        )
+        probe.assert_not_awaited()
+        client.read_gatt_char.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_failed_notification_setup_disconnects_without_sending(self):
+        device = GoveeBLEDevice(_make_ble_device(), legacy_uart=True)
+        client = MagicMock()
+        client.start_notify = AsyncMock(side_effect=BleakError("subscribe failed"))
+        client.disconnect = AsyncMock()
+        client.write_gatt_char = AsyncMock()
+        with (
+            patch("custom_components.govee.api.ble.close_stale_connections_by_address", AsyncMock()),
+            patch("custom_components.govee.api.ble.establish_connection", AsyncMock(return_value=client)),
+        ):
+            with pytest.raises(BleakError, match="subscribe failed"):
+                await device.turn_on()
+        client.disconnect.assert_awaited_once()
+        client.write_gatt_char.assert_not_awaited()
+        assert device._client is None
         assert device.state.power is None
 
 

@@ -182,7 +182,7 @@ class TestH6104OptIn:
         ):
             BleAdvertisementHandler(coord).handle_advertisement(info)
         if options.get(CONF_ENABLE_H6104_BLE):
-            client.assert_called_once_with(info.device, segmented=False)
+            client.assert_called_once_with(info.device, segmented=False, legacy_uart=True)
             assert list(coord._ble_devices.values()) == [client.return_value]
         else:
             client.assert_not_called()

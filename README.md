@@ -199,8 +199,13 @@ not occupy the light's Bluetooth connection. Keep the H6104 in your Govee accoun
 the existing API-key setup and cloud device list are still required.
 
 The light must advertise a model name such as `ihoment_H6104_XXXX`. This fork
-tries the existing power, brightness and single-zone RGB BLE frames. Discovery
-has been observed on an H6104, but **command operation is not hardware-verified**.
+uses the H6104's legacy `FFE0` service / `FFE1` write-and-notify characteristic
+with the existing power, brightness and single-zone RGB BLE frames. The endpoint
+matches both an H6104 GATT capture and the
+[app-derived protocol reference](https://github.com/Brady-Woods/govee-ble-local/blob/535104e8e107b35757e6f90d8bbb2cadf599985c/spec/docs/GOVEE_BLE_GATT_PROTOCOL.md#23-alternate-uart-service-a-few-devices).
+It enables notifications on `FFE1` and skips the modern encryption-version probe:
+the similarly named `2b12` characteristic on this H6104 belongs to its OTA service.
+Discovery has been observed, but **command operation is not hardware-verified**.
 H6104 is deliberately absent from the automatically enabled, verified model list.
 Color temperature, effects, camera/video modes and calibration remain on the
 existing Wi-Fi/cloud paths; this is not a complete offline integration.

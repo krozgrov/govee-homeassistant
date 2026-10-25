@@ -256,6 +256,7 @@ class BleAdvertisementHandler:
             coord._ble_devices[matched_id] = GoveeBLEDevice(
                 service_info.device,
                 segmented=ble_sku in SEGMENTED_MODELS,
+                legacy_uart=ble_sku == "H6104",
             )
             changed = True
             if ble_sku == "H6104":
