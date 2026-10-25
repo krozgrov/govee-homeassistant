@@ -596,6 +596,15 @@ class TestMissingControlCharacteristic:
 
 class TestLegacyIdleDisconnect:
     @pytest.mark.asyncio
+    async def test_failed_reconnect_clears_idle_allowance(self):
+        device = GoveeBLEDevice(_make_ble_device(), legacy_uart=True)
+        device._idle_disconnected = True
+        with patch.object(device, "_ensure_connected", AsyncMock(side_effect=BleakError("connection failed"))):
+            with pytest.raises(BleakError, match="connection failed"):
+                await device.turn_on()
+        assert device.idle_disconnected is False
+
+    @pytest.mark.asyncio
     async def test_idle_releases_the_slot_and_next_command_reconnects(self):
         device = GoveeBLEDevice(_make_ble_device(), legacy_uart=True)
         clients = [MagicMock(), MagicMock()]
@@ -614,12 +623,15 @@ class TestLegacyIdleDisconnect:
             generation = later.call_args.args[2]
             await device._disconnect_if_idle(generation)
             assert device.is_connected is False
+            assert device.idle_disconnected is True
             assert device.state.power is True  # disconnect does not turn it off
             clients[0].disconnect.assert_awaited_once()
             await device.set_tv_mode()
+            assert device.idle_disconnected is False
             assert establish.await_count == 2
             clients[1].write_gatt_char.assert_awaited_once()
             await device.stop()
+            assert device.idle_disconnected is False
             clients[1].disconnect.assert_awaited_once()
 
     @pytest.mark.asyncio

@@ -278,6 +278,7 @@ class GoveeBLEDevice:
         self._lock = asyncio.Lock()
         self._idle_disconnect_handle: asyncio.TimerHandle | None = None
         self._connection_generation = 0
+        self._idle_disconnected = False
         self._callbacks: list[Callable[[GoveeBLEState], None]] = []
 
     # ------------------------------------------------------------------ #
@@ -303,6 +304,11 @@ class GoveeBLEDevice:
     def is_connected(self) -> bool:
         """Whether the current GATT connection is still live."""
         return self._client is not None and bool(self._client.is_connected)
+
+    @property
+    def idle_disconnected(self) -> bool:
+        """The last link was deliberately released, rather than lost or failed."""
+        return self._idle_disconnected
 
     @property
     def segmented(self) -> bool:
@@ -363,6 +369,7 @@ class GoveeBLEDevice:
         if self._client is not None and client is not self._client:
             return
         self._cancel_idle_disconnect()
+        self._idle_disconnected = False
         self._client = None
         # Frame counters restart at 1 on the next connection, so reusing this
         # session would encrypt with nonces the device has already seen.
@@ -395,8 +402,11 @@ class GoveeBLEDevice:
             # got the lock. It owns the connection now; don't disconnect it.
             if generation != self._connection_generation:
                 return
+            if self._client is None:
+                return
             try:
                 await self._disconnect_client()
+                self._idle_disconnected = True
             except Exception:
                 _LOGGER.debug("Idle BLE disconnect failed for %s", self.address, exc_info=True)
 
@@ -483,6 +493,7 @@ class GoveeBLEDevice:
         """
         async with self._lock:
             self._cancel_idle_disconnect()
+            self._idle_disconnected = False
             try:
                 client = await self._ensure_connected()
                 if client.services.get_characteristic(self._write_uuid) is None:
@@ -600,4 +611,5 @@ class GoveeBLEDevice:
         """Cleanly disconnect the ``BleakClient`` (idempotent)."""
         async with self._lock:
             self._cancel_idle_disconnect()
+            self._idle_disconnected = False
             await self._disconnect_client()

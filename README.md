@@ -259,6 +259,15 @@ integration's availability sensor. No power-off or mode-change command is sent
 when releasing the connection. Modern/encrypted models keep their existing
 connection lifecycle.
 
+After an intentional H6104 idle release, a stale advertisement does not prevent
+one reconnect attempt to the previously enrolled device. Starting the attempt
+clears that idle allowance; a real connection/write failure retains the usual
+failure gate until fresh discovery. This also keeps controls actionable when
+the cloud reports the light offline. H6104 DreamView never falls back to the
+unsupported cloud `dreamViewToggle`: a local failure reports the BLE reason.
+This test build is identified by `h6104_ble_build: 2026.10.25.9` in downloaded
+diagnostics, to distinguish packages that share the upstream manifest version.
+
 To verify on your unit, enable the transport diagnostic entities, then check
 power on/off, several brightness levels and red/green/blue with the light's
 Wi-Fi disconnected while its power and HA's network stay on. Check the physical

@@ -437,6 +437,49 @@ class TestH6104BleTier:
     """Route commands after a real H6104 enrollment; only the GATT write is mocked."""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("cloud_online", [False, True])
+    @pytest.mark.parametrize("reason", ["stale_advertisement", "connection failed"])
+    async def test_idle_reconnect_and_unsupported_cloud_toggle_guard(self, monkeypatch, cloud_online, reason):
+        coord = _coordinator()
+        state = _add(coord, _device(sku="H6104"))
+        state.online = cloud_online
+        ble = GoveeBLEDevice(MagicMock(), legacy_uart=True)
+        ble._idle_disconnected = True
+        coord._ble_devices[DEV] = ble
+        coord._transport.record_failure(DEV, "ble", reason)
+        monkeypatch.setattr(coord_mod, "HAS_BLUETOOTH", True)
+        write = AsyncMock()
+        monkeypatch.setattr(ble, "_write", write)
+        if reason == "stale_advertisement":
+            assert coord._ble_write_eligible(DEV) is True
+            assert coord.device_reachable(DEV) is True
+            assert await coord.async_send_dreamview(DEV, True) is True
+            write.assert_awaited_once()
+            assert state.dreamview_enabled is True
+        else:
+            assert coord._ble_write_eligible(DEV) is False
+            with pytest.raises(HomeAssistantError, match="connection failed"):
+                await coord.async_send_dreamview(DEV, True)
+            write.assert_not_awaited()
+        coord._api_client.control_device.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unenrolled_tv_never_sends_unsupported_cloud_toggle(self):
+        coord = _coordinator()
+        _add(coord, _device(sku="H6104"))
+        with pytest.raises(HomeAssistantError, match="Bluetooth"):
+            await coord.async_send_dreamview(DEV, True)
+        coord._api_client.control_device.assert_not_awaited()
+
+    def test_reconnected_tv_remains_actionable_before_next_poll(self):
+        coord = _coordinator()
+        state = _add(coord, _device(sku="H6104"))
+        state.online = False
+        coord._ble_devices[DEV] = MagicMock(is_connected=True, idle_disconnected=False)
+        coord._transport.record_failure(DEV, "ble", "stale_advertisement")
+        assert coord.device_reachable(DEV) is True
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("api_mode,effect", [(5, 0), (6, 1), (4, 2), (3, 3)])
     async def test_music_cloud_ids_are_translated_to_legacy_ble_codes(self, monkeypatch, api_mode, effect):
         coord = _coordinator()
@@ -509,6 +552,11 @@ class TestH6104BleTier:
         monkeypatch.setattr(coord._ble_devices[DEV], "_write", write)
 
         if isinstance(command, ToggleCommand):
+            if write_fails:
+                with pytest.raises(HomeAssistantError, match="requires Bluetooth"):
+                    await coord.async_send_dreamview(DEV, command.enabled)
+                coord._api_client.control_device.assert_not_awaited()
+                return
             assert await coord.async_send_dreamview(DEV, command.enabled) is True
         else:
             assert await coord.async_control_device(DEV, command) is True

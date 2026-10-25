@@ -849,6 +849,9 @@ class GoveeCoordinator(DataUpdateCoordinator[dict[str, GoveeDeviceState]]):
             health = self._transport.get(device_id, kind)
             if health is not None and health.is_available:
                 return True
+        device = self._devices.get(device_id)
+        if device is not None and device.sku == "H6104" and self._ble_write_eligible(device_id):
+            return True
         last = self.mqtt_last_receive_for(device_id)
         return last is not None and (dt_util.utcnow() - last).total_seconds() <= REACHABLE_PUSH_WINDOW
 
@@ -5312,6 +5315,21 @@ class GoveeCoordinator(DataUpdateCoordinator[dict[str, GoveeDeviceState]]):
                     return True
                 # BLE failed — fall through to LAN/MQTT/REST
 
+            if (
+                device.sku == "H6104"
+                and isinstance(command, ToggleCommand)
+                and command.toggle_instance == INSTANCE_DREAMVIEW
+            ):
+                # H6104 exposes this mode only on the legacy BLE transport.
+                # Cloud returns HTTP 200 with an embedded unsupported-instance
+                # error, obscuring why BLE was skipped or failed.
+                health = self._transport.get(device_id, "ble")
+                reason = health.last_failure_reason if health is not None else "not_enrolled"
+                raise HomeAssistantError(
+                    f"H6104 TV mode requires Bluetooth; BLE was unavailable or failed ({reason or 'unknown reason'}). "
+                    "Check the Bluetooth proxy and Govee diagnostics for the BLE failure."
+                )
+
             # LAN (UDP) control tier — sits between BLE and MQTT so precedence
             # is BLE > LAN > MQTT > REST. Unlike the BLE/MQTT blocks above,
             # _try_lan_command owns its optimistic update + transport recording
@@ -5856,6 +5874,25 @@ class GoveeCoordinator(DataUpdateCoordinator[dict[str, GoveeDeviceState]]):
         self._record_local_command(device_id, sku, "mqtt", command, delivered=True)
         return True
 
+    def _h6104_idle_reconnect_eligible(self, device_id: str) -> bool:
+        """Allow a connection attempt after our own idle release, not a failed link.
+
+        Some proxies do not deliver a fresh advert immediately on release.
+        Requiring one to attempt reconnect would deadlock this known device.
+        A failed attempt clears the idle flag and uses normal failure gating.
+        """
+        device = self._devices.get(device_id)
+        client = self._ble_devices.get(device_id)
+        health = self._transport.get(device_id, "ble")
+        return (
+            device is not None
+            and device.sku == "H6104"
+            and client is not None
+            and client.idle_disconnected is True
+            and health is not None
+            and health.last_failure_reason in (None, "stale_advertisement")
+        )
+
     def _ble_write_eligible(self, device_id: str) -> bool:
         """Return True if this device's BLE advertisements are fresh enough to write to.
 
@@ -5864,6 +5901,8 @@ class GoveeCoordinator(DataUpdateCoordinator[dict[str, GoveeDeviceState]]):
         blindly and never fall through to LAN/MQTT/REST (#198).
         """
         health = self._transport.get(device_id, "ble")
+        if self._h6104_idle_reconnect_eligible(device_id):
+            return True
         if health is not None and health.last_failure_reason == "stale_advertisement":
             client = self._ble_devices.get(device_id)
             if client is not None and client.is_connected is True:
@@ -6180,7 +6219,7 @@ class GoveeCoordinator(DataUpdateCoordinator[dict[str, GoveeDeviceState]]):
             _LOGGER.error("Unknown device for DreamView: %s", device_id)
             return False
 
-        if device.sku == "H6104" and device_id in self._ble_devices:
+        if device.sku == "H6104":
             return await self.async_control_device(device_id, create_dreamview_command(enabled))
 
         # Try REST API first (works for HTTP-capable devices like H6097), except
