@@ -223,6 +223,9 @@
       },
       "govee_heater_temperature": {
         "name": "Target temperature"
+      },
+      "govee_tv_sensitivity": {
+        "name": "TV sensitivity"
       }
     },
     "select": {
@@ -266,6 +269,9 @@
           "black_tea_boil": "Black tea / boil",
           "manual": "Manual"
         }
+      },
+      "govee_tv_area": {
+        "name": "TV screen area"
       }
     },
     "switch": {

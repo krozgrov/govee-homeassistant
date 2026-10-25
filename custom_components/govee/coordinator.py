@@ -437,6 +437,8 @@ class GoveeCoordinator(DataUpdateCoordinator[dict[str, GoveeDeviceState]]):
         )
 
         self._config_entry = config_entry
+        self._h6104_tv_settings: dict[str, tuple[int, int]] = {}
+        self._h6104_tv_settings_locks: dict[str, asyncio.Lock] = {}
         # The options this instance was built with. The entry's update listener
         # compares against this to tell an options change from a data-only
         # write, such as storing a refreshed account token (#132) — reloading
@@ -5879,6 +5881,7 @@ class GoveeCoordinator(DataUpdateCoordinator[dict[str, GoveeDeviceState]]):
             return False
         device = self._devices.get(device_id)
         ble_sku = device.sku if device is not None else "unknown"
+        detail = None
 
         try:
             if isinstance(command, PowerCommand):
@@ -5900,7 +5903,9 @@ class GoveeCoordinator(DataUpdateCoordinator[dict[str, GoveeDeviceState]]):
                 and ble_sku == "H6104"
             ):
                 if command.enabled:
-                    await ble_device.set_tv_mode()
+                    area, sensitivity = self.h6104_tv_settings(device_id)
+                    await ble_device.set_tv_mode(area=area, sensitivity=sensitivity)
+                    detail = f"H6104 TV mode area={area} sensitivity={sensitivity}"
                 else:
                     state = self._states.get(device_id)
                     color = (state.last_color or state.color) if state else None
@@ -5925,7 +5930,7 @@ class GoveeCoordinator(DataUpdateCoordinator[dict[str, GoveeDeviceState]]):
             # `refresh_ble_staleness` uses to decide the device stopped
             # advertising; a blind write must not move it (#198).
             self._record_transport_send(device_id, "ble")
-            self._record_local_command(device_id, ble_sku, "ble", command, delivered=True)
+            self._record_local_command(device_id, ble_sku, "ble", command, delivered=True, detail=detail)
             # A successful BLE write reaches the device directly — flip
             # `online` back True if a stale `online: false` from the cloud
             # is masking a recovered device (issue #68).
@@ -6094,6 +6099,40 @@ class GoveeCoordinator(DataUpdateCoordinator[dict[str, GoveeDeviceState]]):
             self.clear_music_mode(device_id)
 
         return success
+
+    def h6104_tv_settings(self, device_id: str) -> tuple[int, int]:
+        """Return desired area/sensitivity; entity restoration persists them."""
+        return self._h6104_tv_settings.get(device_id, (1, 50))
+
+    def restore_h6104_tv_settings(
+        self, device_id: str, *, area: int | None = None, sensitivity: int | None = None
+    ) -> None:
+        """Restore desired settings without sending a command or selecting TV mode."""
+        old_area, old_sensitivity = self.h6104_tv_settings(device_id)
+        area = old_area if area is None else area
+        sensitivity = old_sensitivity if sensitivity is None else sensitivity
+        if area not in (0, 1) or not 0 <= sensitivity <= 100:
+            raise ValueError("Invalid H6104 TV settings")
+        self._h6104_tv_settings[device_id] = (area, sensitivity)
+
+    async def async_update_h6104_tv_settings(
+        self, device_id: str, *, area: int | None = None, sensitivity: int | None = None
+    ) -> bool:
+        """Apply desired settings immediately only when TV mode is already active."""
+        lock = self._h6104_tv_settings_locks.setdefault(device_id, asyncio.Lock())
+        async with lock:
+            previous = self.h6104_tv_settings(device_id)
+            self.restore_h6104_tv_settings(device_id, area=area, sensitivity=sensitivity)
+            state = self._states.get(device_id)
+            try:
+                if state is not None and state.dreamview_enabled:
+                    if not await self.async_send_dreamview(device_id, True):
+                        self._h6104_tv_settings[device_id] = previous
+                        return False
+            except Exception:
+                self._h6104_tv_settings[device_id] = previous
+                raise
+            return True
 
     async def async_send_dreamview(self, device_id: str, enabled: bool) -> bool:
         """Send DreamView command via REST API, with BLE fallback.

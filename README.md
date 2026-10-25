@@ -207,11 +207,23 @@ It enables notifications on `FFE1` and skips the modern encryption-version probe
 the similarly named `2b12` characteristic on this H6104 belongs to its OTA service.
 Discovery has been observed, but **command operation is not hardware-verified**.
 H6104 is deliberately absent from the automatically enabled, verified model list.
-The H6104 **DreamView** switch selects TV/camera mode directly over BLE (whole
-screen, sensitivity 50). Turn the light on first, then turn this switch on.
-Turning it off restores a solid color. This H6104 frame is app-derived and still
-requires physical verification. Color temperature, other effects and camera
-calibration remain on the existing Wi-Fi/cloud paths.
+The H6104 **DreamView** switch selects TV/camera mode directly over BLE. Turn the
+light on first, then turn this switch on. Turning it off restores a solid color.
+The device's Configuration section also exposes **TV sensitivity** (0–100) and
+**TV screen area** (Part of screen / Whole screen). Defaults are sensitivity 50
+and Whole screen. Changes apply immediately while DreamView is on; while it is
+off they are saved for the next activation. Each device restores its desired
+settings across HA restarts without sending mode commands during restoration.
+These are locally remembered settings, not values read back from the camera.
+
+Sensitivity is the camera's response setting, not an exposed camera frame rate.
+The H6104 reference does not identify a separate refresh-rate control or the
+H6101's dynamic/soft mode selector. Power and TV-mode activation have been
+field-tested on the user's H6104; adjustable settings still need hardware
+verification. Selecting a solid RGB color or color temperature clears the
+DreamView switch state. Brightness changes leave TV mode selected.
+Color temperature, other effects and camera calibration remain on the existing
+Wi-Fi/cloud paths.
 
 A live GATT connection stays available even when the light stops advertising.
 Disconnected devices still require fresh advertisements, and real write errors

@@ -481,15 +481,17 @@ class GoveeBLEDevice:
         self._state.brightness = value
         self._emit()
 
-    async def set_tv_mode(self) -> None:
-        """Select H6104 video mode, whole screen, sensitivity 50.
+    async def set_tv_mode(self, area: int = 1, sensitivity: int = 50) -> None:
+        """Select H6104 video mode with screen area and sensitivity.
 
         App-derived SubModeVideo layout: 33 05 00 00 area sensitivity.
         https://github.com/Brady-Woods/govee-ble-local/blob/535104e8e107b35757e6f90d8bbb2cadf599985c/spec/docs/OPCODE_COVERAGE.md
         """
         if not self._legacy_uart:
             raise BleakError("TV mode is only implemented for the H6104 UART profile")
-        await self._write(_build_frame(LedPacketCmd.COLOR, [0x00, 0x00, 0x01, 50]))
+        if area not in (0, 1) or not 0 <= sensitivity <= 100:
+            raise ValueError("TV area must be 0/1 and sensitivity must be 0-100")
+        await self._write(_build_frame(LedPacketCmd.COLOR, [0x00, 0x00, area, sensitivity]))
 
     async def set_rgb(self, red: int, green: int, blue: int) -> None:
         """Set RGB color.

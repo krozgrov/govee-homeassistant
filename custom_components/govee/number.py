@@ -22,9 +22,10 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.util.unit_conversion import TemperatureConverter
 
 from .api.probe_thermometer import probes_for_sku
-from .const import SUFFIX_HEATER_TEMPERATURE, SUFFIX_MUSIC_SENSITIVITY
+from .const import CONF_ENABLE_H6104_BLE, SUFFIX_HEATER_TEMPERATURE, SUFFIX_MUSIC_SENSITIVITY
 from .coordinator import GoveeConfigEntry, GoveeCoordinator
 from .entity import GoveeEntity
+from .h6104 import GoveeTVSensitivityNumber
 from .models import GoveeDevice, MusicModeCommand, TemperatureSettingCommand
 
 _LOGGER = logging.getLogger(__name__)
@@ -43,6 +44,8 @@ async def async_setup_entry(
     entities: list[NumberEntity] = []
 
     for device in coordinator.devices.values():
+        if device.sku == "H6104" and not device.is_group and entry.options.get(CONF_ENABLE_H6104_BLE, False) is True:
+            entities.append(GoveeTVSensitivityNumber(coordinator, device))
         # Probe thermometer alarm limits: four per probe.
         if device.is_probe_thermometer:
             for probe in probes_for_sku(device.sku):

@@ -16,6 +16,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
     CONF_ENABLE_DIY_SCENES,
+    CONF_ENABLE_H6104_BLE,
     CONF_ENABLE_SCENES,
     DEFAULT_ENABLE_DIY_SCENES,
     DEFAULT_ENABLE_SCENES,
@@ -32,6 +33,7 @@ from .const import (
 )
 from .coordinator import GoveeConfigEntry, GoveeCoordinator
 from .entity import GoveeEntity
+from .h6104 import GoveeTVAreaSelect
 from .kettle.entities import kettle_selects
 from .models import (
     GoveeDevice,
@@ -89,6 +91,8 @@ async def async_setup_entry(
     )
 
     for device in coordinator.devices.values():
+        if device.sku == "H6104" and not device.is_group and entry.options.get(CONF_ENABLE_H6104_BLE, False) is True:
+            entities.append(GoveeTVAreaSelect(coordinator, device))
         _LOGGER.debug(
             "Device %s: supports_scenes=%s supports_diy_scenes=%s is_group=%s",
             device.name,
