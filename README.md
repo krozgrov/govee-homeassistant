@@ -227,12 +227,22 @@ Wi-Fi/cloud paths.
 
 The H6104 **Music mode** switch, **Music mode** dropdown and **Music sensitivity**
 slider now send automatic-color music modes over FFE1 BLE as well. The advertised
-modes are Rhythm, Rolling, Energic and Spectrum (codes 3–6). Turning music off
+modes are Rhythm, Rolling, Energic and Spectrum (cloud IDs 3–6). Turning music off
 restores a solid color over BLE. Music and DreamView clear each other's switch
 state; choosing a solid color clears both. The music frame is taken from the
 app-derived H6104 `SubModeMusic` reference (`33 05 01 code sensitivity`), but
 physical music-mode operation still needs testing. Fixed-color and unsupported
 music variants retain their previous fallback path.
+
+The cloud IDs 3–6 must **not** be sent unchanged as legacy BLE effect codes:
+the candidate legacy mapping is Energic=0, Spectrum=1, Rolling=2, Rhythm=3,
+matching [the original legacy implementation](https://github.com/softgrass/govee-api-ble/blob/master/src/govee_api_ble/device.py).
+Spectrum and Rolling also carry RGB from the remembered/current solid color
+(white if none is known). That reference was tested on other legacy models;
+the mapping remains unverified on this H6104. The initial unconverted-code
+build did not produce music effects in field testing. If the corrected build
+does not either, compare a working Govee-app BLE capture before changing more
+command bytes. Diagnostics report both cloud and BLE effect IDs and the color.
 
 A live GATT connection stays available even when the light stops advertising.
 Disconnected devices still require fresh advertisements, and real write errors
@@ -240,6 +250,14 @@ still make BLE unavailable. This avoids the previous three-minute
 `stale_advertisement` cutoff without treating unacknowledged writes as received
 packets. After installing this build, restart HA and test controls after both
 several minutes idle and repeated mode/power changes.
+
+H6104 now disconnects its GATT link after five seconds without commands to free
+the Bluetooth proxy slot, reconnecting for the next command. A burst of commands
+reuses the link and resets the idle timer. It is normal for it to disappear from
+the proxy's active-connections list while idle: that list is different from the
+integration's availability sensor. No power-off or mode-change command is sent
+when releasing the connection. Modern/encrypted models keep their existing
+connection lifecycle.
 
 To verify on your unit, enable the transport diagnostic entities, then check
 power on/off, several brightness levels and red/green/blue with the light's

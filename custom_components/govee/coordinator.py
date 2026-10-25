@@ -5899,13 +5899,21 @@ class GoveeCoordinator(DataUpdateCoordinator[dict[str, GoveeDeviceState]]):
                     command.color.b,
                 )
             elif isinstance(command, MusicModeCommand) and ble_sku == "H6104":
-                # The UI advertises auto-color codes 3-6. Preserve the existing
-                # fallback for fixed-color or unknown variants rather than
-                # silently discarding their additional command parameters.
                 if command.auto_color != 1 or command.music_mode not in (3, 4, 5, 6):
                     return False
-                await ble_device.set_music_mode(command.music_mode, command.sensitivity)
-                detail = f"H6104 music mode={command.music_mode} sensitivity={command.sensitivity}"
+                # H6104 API IDs from the field capability dump differ from
+                # legacy BLE effect codes: Energic 5->0, Spectrum 6->1,
+                # Rolling 4->2, Rhythm 3->3. Codes 1/2 also need RGB bytes.
+                # https://github.com/softgrass/govee-api-ble/blob/master/src/govee_api_ble/device.py
+                effect = {5: 0, 6: 1, 4: 2, 3: 3}[command.music_mode]
+                state = self._states.get(device_id)
+                color = (state.last_color or state.color) if state else None
+                color = color or RGBColor(255, 255, 255)
+                await ble_device.set_music_mode(effect, command.sensitivity, rgb=color.as_tuple)
+                detail = (
+                    f"H6104 music api_mode={command.music_mode} ble_effect={effect} "
+                    f"sensitivity={command.sensitivity} rgb={color.as_tuple}"
+                )
             elif (
                 isinstance(command, ToggleCommand)
                 and command.toggle_instance == INSTANCE_DREAMVIEW

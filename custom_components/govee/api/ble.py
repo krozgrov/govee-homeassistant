@@ -117,6 +117,7 @@ _PACKET_HEAD_COMMAND = 0x33
 
 # Connection management
 _MAX_CONNECT_ATTEMPTS = 4
+_LEGACY_IDLE_DISCONNECT_SECONDS = 5.0
 
 
 class LedPacketCmd(IntEnum):
@@ -275,6 +276,8 @@ class GoveeBLEDevice:
         self._session: GoveeBLESession | None = None
         self._state = GoveeBLEState()
         self._lock = asyncio.Lock()
+        self._idle_disconnect_handle: asyncio.TimerHandle | None = None
+        self._connection_generation = 0
         self._callbacks: list[Callable[[GoveeBLEState], None]] = []
 
     # ------------------------------------------------------------------ #
@@ -359,10 +362,55 @@ class GoveeBLEDevice:
         """
         if self._client is not None and client is not self._client:
             return
+        self._cancel_idle_disconnect()
         self._client = None
         # Frame counters restart at 1 on the next connection, so reusing this
         # session would encrypt with nonces the device has already seen.
         self._session = None
+
+    def _cancel_idle_disconnect(self) -> None:
+        """Invalidate queued idle work before a command, disconnect or shutdown."""
+        self._connection_generation += 1
+        if self._idle_disconnect_handle is not None:
+            self._idle_disconnect_handle.cancel()
+            self._idle_disconnect_handle = None
+
+    def _schedule_idle_disconnect(self) -> None:
+        """Release the H6104 proxy slot after a short burst of commands."""
+        if not self._legacy_uart or self._client is None:
+            return
+        self._idle_disconnect_handle = asyncio.get_running_loop().call_later(
+            _LEGACY_IDLE_DISCONNECT_SECONDS, self._begin_idle_disconnect, self._connection_generation
+        )
+
+    def _begin_idle_disconnect(self, generation: int) -> None:
+        if generation != self._connection_generation:
+            return
+        self._idle_disconnect_handle = None
+        asyncio.create_task(self._disconnect_if_idle(generation))
+
+    async def _disconnect_if_idle(self, generation: int) -> None:
+        async with self._lock:
+            # A command can arrive after the timer fired but before this task
+            # got the lock. It owns the connection now; don't disconnect it.
+            if generation != self._connection_generation:
+                return
+            try:
+                await self._disconnect_client()
+            except Exception:
+                _LOGGER.debug("Idle BLE disconnect failed for %s", self.address, exc_info=True)
+
+    async def _disconnect_client(self) -> None:
+        """Disconnect under the caller's lock without changing light power/mode."""
+        client = self._client
+        try:
+            if client is not None and client.is_connected:
+                await client.disconnect()
+        except BleakError:
+            _LOGGER.debug("Error disconnecting Govee BLE client %s (ignored)", self.address)
+        finally:
+            self._client = None
+            self._session = None
 
     async def _ensure_connected(self) -> BleakClient:
         """Open or return the cached ``BleakClient`` for this device.
@@ -434,24 +482,28 @@ class GoveeBLEDevice:
         the session cipher, so every command encoding above is shared.
         """
         async with self._lock:
-            client = await self._ensure_connected()
-            if client.services.get_characteristic(self._write_uuid) is None:
-                # Expose structure only, never characteristic values. Older
-                # H6104 firmware can connect without exposing our control UUID;
-                # its actual GATT layout is needed before selecting a protocol.
-                services = [
-                    f"{service.uuid}: "
-                    + ", ".join(f"{char.uuid} ({'/'.join(char.properties)})" for char in service.characteristics)
-                    for service in client.services
-                ]
-                raise BleakError(
-                    f"Control characteristic {self._write_uuid} was not found. "
-                    f"Discovered GATT services: {'; '.join(services) or 'none'}. "
-                    "No BLE command was sent; no alternate characteristic was tried."
-                )
-            if self._session is not None:
-                frame = self._session.wrap(frame)
-            await client.write_gatt_char(self._write_uuid, frame, response=False)
+            self._cancel_idle_disconnect()
+            try:
+                client = await self._ensure_connected()
+                if client.services.get_characteristic(self._write_uuid) is None:
+                    # Expose structure only, never characteristic values. Older
+                    # H6104 firmware can connect without exposing our control UUID;
+                    # its actual GATT layout is needed before selecting a protocol.
+                    services = [
+                        f"{service.uuid}: "
+                        + ", ".join(f"{char.uuid} ({'/'.join(char.properties)})" for char in service.characteristics)
+                        for service in client.services
+                    ]
+                    raise BleakError(
+                        f"Control characteristic {self._write_uuid} was not found. "
+                        f"Discovered GATT services: {'; '.join(services) or 'none'}. "
+                        "No BLE command was sent; no alternate characteristic was tried."
+                    )
+                if self._session is not None:
+                    frame = self._session.wrap(frame)
+                await client.write_gatt_char(self._write_uuid, frame, response=False)
+            finally:
+                self._schedule_idle_disconnect()
 
     # ------------------------------------------------------------------ #
     # High-level command API
@@ -493,19 +545,24 @@ class GoveeBLEDevice:
             raise ValueError("TV area must be 0/1 and sensitivity must be 0-100")
         await self._write(_build_frame(LedPacketCmd.COLOR, [0x00, 0x00, area, sensitivity]))
 
-    async def set_music_mode(self, mode: int, sensitivity: int = 50) -> None:
-        """Select an H6104 automatic-color music effect over its UART.
+    async def set_music_mode(
+        self, mode: int, sensitivity: int = 50, rgb: tuple[int, int, int] = (255, 255, 255)
+    ) -> None:
+        """Select a legacy BLE music code, not a Developer API effect ID.
 
         H6104 SubModeMusic: 33 05 01 code sensitivity. Codes 1/2 additionally
-        require RGB; those fixed-color variants are deliberately not exposed.
-        Codes 3-6 are the automatic modes advertised by this H6104's API.
+        require RGB. Legacy codes are Energic=0, Spectrum=1, Rolling=2,
+        Rhythm=3 (softgrass/govee-api-ble; still needs H6104 field validation).
         https://github.com/Brady-Woods/govee-ble-local/blob/535104e8e107b35757e6f90d8bbb2cadf599985c/spec/docs/OPCODE_COVERAGE.md
         """
         if not self._legacy_uart:
             raise BleakError("Music mode is only implemented for the H6104 UART profile")
-        if mode not in (3, 4, 5, 6) or not 0 <= sensitivity <= 100:
+        if mode not in (0, 1, 2, 3) or not 0 <= sensitivity <= 100:
             raise ValueError("Unsupported H6104 music mode or sensitivity")
-        await self._write(_build_frame(LedPacketCmd.COLOR, [0x01, mode, sensitivity]))
+        payload = [0x01, mode, sensitivity]
+        if mode in (1, 2):
+            payload.extend(max(0, min(255, int(value))) for value in rgb)
+        await self._write(_build_frame(LedPacketCmd.COLOR, payload))
 
     async def set_rgb(self, red: int, green: int, blue: int) -> None:
         """Set RGB color.
@@ -542,13 +599,5 @@ class GoveeBLEDevice:
     async def stop(self) -> None:
         """Cleanly disconnect the ``BleakClient`` (idempotent)."""
         async with self._lock:
-            if self._client is not None and self._client.is_connected:
-                try:
-                    await self._client.disconnect()
-                except BleakError:
-                    _LOGGER.debug(
-                        "Error disconnecting Govee BLE client %s (ignored)",
-                        self.address,
-                    )
-            self._client = None
-            self._session = None
+            self._cancel_idle_disconnect()
+            await self._disconnect_client()

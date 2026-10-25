@@ -437,6 +437,21 @@ class TestH6104BleTier:
     """Route commands after a real H6104 enrollment; only the GATT write is mocked."""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("api_mode,effect", [(5, 0), (6, 1), (4, 2), (3, 3)])
+    async def test_music_cloud_ids_are_translated_to_legacy_ble_codes(self, monkeypatch, api_mode, effect):
+        coord = _coordinator()
+        state = _add(coord, _device(sku="H6104"))
+        state.color = RGBColor(10, 20, 30)
+        ble = GoveeBLEDevice(MagicMock(), legacy_uart=True)
+        write = AsyncMock()
+        monkeypatch.setattr(ble, "_write", write)
+        coord._ble_devices[DEV] = ble
+        assert await coord._try_ble_command(DEV, MusicModeCommand(music_mode=api_mode, sensitivity=80)) is True
+        frame = write.call_args.args[0]
+        assert frame[:5] == bytes([0x33, 5, 1, effect, 80])
+        assert frame[5:8] == (bytes([10, 20, 30]) if effect in (1, 2) else bytes(3))
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("mode", [1, 3])
     async def test_music_on_and_off_use_ble_and_update_mode_switches(self, monkeypatch, mode):
         coord = _coordinator()
@@ -469,7 +484,7 @@ class TestH6104BleTier:
             (BrightnessCommand(brightness=128), bytes.fromhex("330480")),
             (ColorCommand(color=RGBColor(r=255, g=0, b=64)), bytes.fromhex("330502ff0040")),
             (ColorTempCommand(kelvin=3000), None),
-            (MusicModeCommand(music_mode=5, sensitivity=80), bytes.fromhex("3305010550")),
+            (MusicModeCommand(music_mode=5, sensitivity=80), bytes.fromhex("3305010050")),
             (MusicModeCommand(music_mode=5, sensitivity=80, auto_color=0, rgb=0xFF0000), None),
             (ToggleCommand(toggle_instance=INSTANCE_DREAMVIEW, enabled=True), bytes.fromhex("330500000132")),
             (ToggleCommand(toggle_instance=INSTANCE_DREAMVIEW, enabled=False), bytes.fromhex("330502ffffff")),

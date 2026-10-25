@@ -12,6 +12,7 @@ Reference behavior is validated against Beshelmek/govee_ble_lights
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -593,16 +594,84 @@ class TestMissingControlCharacteristic:
         assert device.state.power is None
 
 
+class TestLegacyIdleDisconnect:
+    @pytest.mark.asyncio
+    async def test_idle_releases_the_slot_and_next_command_reconnects(self):
+        device = GoveeBLEDevice(_make_ble_device(), legacy_uart=True)
+        clients = [MagicMock(), MagicMock()]
+        for client in clients:
+            client.is_connected = True
+            client.start_notify = AsyncMock()
+            client.disconnect = AsyncMock()
+            client.write_gatt_char = AsyncMock()
+        with (
+            patch("custom_components.govee.api.ble.close_stale_connections_by_address", AsyncMock()),
+            patch("custom_components.govee.api.ble.establish_connection", AsyncMock(side_effect=clients)) as establish,
+            patch.object(asyncio.get_running_loop(), "call_later") as later,
+        ):
+            await device.turn_on()
+            assert later.call_args.args[0] == 5.0
+            generation = later.call_args.args[2]
+            await device._disconnect_if_idle(generation)
+            assert device.is_connected is False
+            assert device.state.power is True  # disconnect does not turn it off
+            clients[0].disconnect.assert_awaited_once()
+            await device.set_tv_mode()
+            assert establish.await_count == 2
+            clients[1].write_gatt_char.assert_awaited_once()
+            await device.stop()
+            clients[1].disconnect.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_new_command_invalidates_a_queued_idle_disconnect(self):
+        device = GoveeBLEDevice(_make_ble_device(), legacy_uart=True)
+        client = MagicMock()
+        client.is_connected = True
+        client.disconnect = AsyncMock()
+        client.write_gatt_char = AsyncMock()
+        device._client = client
+        with patch.object(asyncio.get_running_loop(), "call_later") as later:
+            await device.turn_on()
+            old_generation = later.call_args.args[2]
+            await device.set_brightness(128)
+            later.return_value.cancel.assert_called()
+            await device._disconnect_if_idle(old_generation)
+            assert device.is_connected is True
+            client.disconnect.assert_not_awaited()
+            # A timer callback that was already queued must not clobber the
+            # newly scheduled handle or disconnect the reused client.
+            handle = device._idle_disconnect_handle
+            device._begin_idle_disconnect(old_generation)
+            assert device._idle_disconnect_handle is handle
+            await device.stop()
+
+    @pytest.mark.asyncio
+    async def test_idle_callback_disconnects_and_modern_clients_are_not_scheduled(self):
+        device = GoveeBLEDevice(_make_ble_device(), legacy_uart=True)
+        client = MagicMock(is_connected=True)
+        client.disconnect = AsyncMock()
+        device._client = client
+        device._begin_idle_disconnect(device._connection_generation)
+        await asyncio.sleep(0)
+        client.disconnect.assert_awaited_once()
+        modern = GoveeBLEDevice(_make_ble_device())
+        modern._client = MagicMock()
+        with patch.object(asyncio.get_running_loop(), "call_later") as later:
+            modern._schedule_idle_disconnect()
+        later.assert_not_called()
+
+
 class TestLegacyUartTransport:
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("mode", [3, 4, 5, 6])
+    @pytest.mark.parametrize("mode", [0, 1, 2, 3])
     @pytest.mark.parametrize("sensitivity", [0, 50, 100])
     async def test_music_modes_use_h6104_frame(self, mode, sensitivity):
         device = GoveeBLEDevice(_make_ble_device(), legacy_uart=True)
         with patch.object(device, "_write", AsyncMock()) as write:
-            await device.set_music_mode(mode, sensitivity)
+            await device.set_music_mode(mode, sensitivity, rgb=(10, 20, 30))
         frame = write.call_args.args[0]
         assert frame[:5] == bytes([0x33, 0x05, 1, mode, sensitivity])
+        assert frame[5:8] == (bytes([10, 20, 30]) if mode in (1, 2) else bytes(3))
         assert len(frame) == 20
         checksum = 0
         for value in frame[:-1]:
@@ -610,7 +679,7 @@ class TestLegacyUartTransport:
         assert frame[-1] == checksum
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("mode,sensitivity", [(1, 50), (2, 50), (7, 50), (3, -1), (3, 101)])
+    @pytest.mark.parametrize("mode,sensitivity", [(-1, 50), (4, 50), (7, 50), (3, -1), (3, 101)])
     async def test_unsupported_music_parameters_do_not_write(self, mode, sensitivity):
         device = GoveeBLEDevice(_make_ble_device(), legacy_uart=True)
         with patch.object(device, "_write", AsyncMock()) as write:
