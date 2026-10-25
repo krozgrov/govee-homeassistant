@@ -20,6 +20,8 @@ import pytest
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 
 import custom_components.govee.coordinator as coord_mod
+import custom_components.govee.ble_advertisement as ble_mod
+from custom_components.govee.api.ble import BLE_COMMAND_SUPPORTED_MODELS, SEGMENTED_MODELS, GoveeBLEDevice
 from custom_components.govee.api.auth import GoveeIotCredentials
 from custom_components.govee.api.ble_packet import (
     build_packet,
@@ -29,7 +31,7 @@ from custom_components.govee.api.ble_packet import (
 )
 from custom_components.govee.api.exceptions import GoveeApiError, GoveeAuthError
 from custom_components.govee.api.lan_client import LanDevStatus, LanDeviceInfo
-from custom_components.govee.const import CONF_ENABLE_MQTT_CONTROL
+from custom_components.govee.const import CONF_ENABLE_H6104_BLE, CONF_ENABLE_MQTT_CONTROL
 from custom_components.govee.ble_passthrough import BlePassthroughManager
 from custom_components.govee.coordinator import GoveeCoordinator
 from custom_components.govee.models import (
@@ -429,6 +431,51 @@ class TestLanTierEdges:
             )
             is False
         )
+
+
+class TestH6104BleTier:
+    """Route commands after a real H6104 enrollment; only the GATT write is mocked."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "command,head",
+        [
+            (PowerCommand(power_on=True), bytes.fromhex("330101")),
+            (PowerCommand(power_on=False), bytes.fromhex("330100")),
+            (BrightnessCommand(brightness=128), bytes.fromhex("330480")),
+            (ColorCommand(color=RGBColor(r=255, g=0, b=64)), bytes.fromhex("330502ff0040")),
+            (ColorTempCommand(kelvin=3000), None),
+        ],
+    )
+    @pytest.mark.parametrize("write_fails", [False, True])
+    async def test_enroll_and_control(self, monkeypatch, command, head, write_fails):
+        coord = _coordinator(options={CONF_ENABLE_H6104_BLE: True})
+        _add(coord, _device(sku="H6104"))
+        monkeypatch.setattr(ble_mod, "GoveeBLEDevice", GoveeBLEDevice, raising=False)
+        monkeypatch.setattr(ble_mod, "SEGMENTED_MODELS", SEGMENTED_MODELS, raising=False)
+        monkeypatch.setattr(ble_mod, "BLE_COMMAND_SUPPORTED_MODELS", BLE_COMMAND_SUPPORTED_MODELS, raising=False)
+        bt = MagicMock()
+        bt.async_scanner_count.return_value = 1
+        monkeypatch.setattr(ble_mod, "bt_component", bt, raising=False)
+        monkeypatch.setattr(coord_mod, "HAS_BLUETOOTH", True)
+        info = MagicMock()
+        info.name = "ihoment_H6104_ABCD"
+        info.address = "AA:BB:CC:DD:EE:FF"
+        ble_mod.BleAdvertisementHandler(coord).handle_advertisement(info)
+        write = AsyncMock(side_effect=TimeoutError("gatt") if write_fails else None)
+        monkeypatch.setattr(coord._ble_devices[DEV], "_write", write)
+
+        assert await coord.async_control_device(DEV, command) is True
+
+        if head is not None:
+            write.assert_awaited_once()
+            assert write.call_args.args[0].startswith(head)
+        else:
+            write.assert_not_awaited()
+        if head is None or write_fails:
+            coord._api_client.control_device.assert_awaited_once()
+        else:
+            coord._api_client.control_device.assert_not_awaited()
 
 
 class TestBleTier:

@@ -177,7 +177,34 @@ Every device also gets two diagnostic timestamps — **Last Update Received** an
 
 This matters beyond speed: Govee's cloud sometimes answers a color command with `success` and never delivers it to the device (the light doesn't change, and nothing reports an error). Sending color locally sidesteps the cloud entirely — see [Colors don't apply](#troubleshooting).
 
-**Command routing.** Each command takes the fastest transport that can carry it *and confirm it*, falling back automatically: **BLE → LAN → MQTT → cloud REST**. LAN carries power, brightness, color and color temperature — exactly the four values a device reports back, which is what makes verify‑by‑read possible. MQTT (opt‑in) carries power, brightness and color. Direct BLE control is deliberately limited to the models confirmed to honour it: the H6199, and the H1270 over the encrypted BLE transport its firmware requires. Other models (the H6072 among them) advertise Bluetooth but silently drop writes, so they are never sent BLE commands. Everything else — scenes, segments, music mode, work modes, toggles — always goes over the cloud API, with one exception: Tower Fan 2 (H7105/H7107) oscillation goes over the AWS IoT session when account login is configured, because the cloud toggle is a no-op on those fans.
+**Command routing.** Each command takes the fastest eligible transport, falling back automatically on errors: **BLE → LAN → MQTT → cloud REST**. LAN carries power, brightness, color and color temperature — exactly the four values a device reports back, which is what makes verify‑by‑read possible. MQTT (opt‑in) carries power, brightness and color. Automatic direct BLE control is deliberately limited to the models confirmed to honour it: the H6199, and the H1270 over the encrypted BLE transport its firmware requires. This fork also offers an explicit experimental H6104 opt-in, described below. Other models (the H6072 among them) advertise Bluetooth but silently drop writes, so they are never sent BLE commands. Everything else — scenes, segments, music mode, work modes, toggles — always goes over the cloud API, with one exception: Tower Fan 2 (H7105/H7107) oscillation goes over the AWS IoT session when account login is configured, because the cloud toggle is a no-op on those fans.
+
+### Experimental H6104 TV backlight Bluetooth control (this fork)
+
+Under **Settings → Devices & services → Govee → Configure → General**, enable
+**Enable experimental H6104 Bluetooth control**. Saving options reloads the
+integration. Leave Home Assistant's Bluetooth integration enabled and use a
+connectable local adapter or an ESPHome proxy with active connections enabled
+within range of the light. Close the Govee phone app during testing so it does
+not occupy the light's Bluetooth connection. Keep the H6104 in your Govee account;
+the existing API-key setup and cloud device list are still required.
+
+The light must advertise a model name such as `ihoment_H6104_XXXX`. This fork
+tries the existing power, brightness and single-zone RGB BLE frames. Discovery
+has been observed on an H6104, but **command operation is not hardware-verified**.
+H6104 is deliberately absent from the automatically enabled, verified model list.
+Color temperature, effects, camera/video modes and calibration remain on the
+existing Wi-Fi/cloud paths; this is not a complete offline integration.
+
+To verify on your unit, enable the transport diagnostic entities, then check
+power on/off, several brightness levels and red/green/blue with the light's
+Wi-Fi disconnected while its power and HA's network stay on. Check the physical
+light as well as `recent_commands` in integration diagnostics: BLE state is
+optimistic and a successful GATT write **does not confirm the light acted**.
+Connection/write errors retain the existing cloud fallback, but silently ignored
+frames cannot trigger it. If the light does not react, disable this option to
+restore normal routing and collect debug logs/GATT service details before trying
+another protocol. Repeat the test after reconnecting Wi-Fi and after restarting HA.
 
 Commands always use optimistic updates, so the UI reflects your action immediately and reconciles with the next confirmed state. MQTT publishes are acknowledged by the broker (QoS 1); an unacknowledged send falls through to REST rather than being reported as success.
 
