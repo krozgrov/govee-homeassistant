@@ -445,6 +445,8 @@ class TestH6104BleTier:
             (BrightnessCommand(brightness=128), bytes.fromhex("330480")),
             (ColorCommand(color=RGBColor(r=255, g=0, b=64)), bytes.fromhex("330502ff0040")),
             (ColorTempCommand(kelvin=3000), None),
+            (ToggleCommand(toggle_instance=INSTANCE_DREAMVIEW, enabled=True), bytes.fromhex("330500000132")),
+            (ToggleCommand(toggle_instance=INSTANCE_DREAMVIEW, enabled=False), bytes.fromhex("330502ffffff")),
         ],
     )
     @pytest.mark.parametrize("write_fails", [False, True])
@@ -465,7 +467,10 @@ class TestH6104BleTier:
         write = AsyncMock(side_effect=TimeoutError("gatt") if write_fails else None)
         monkeypatch.setattr(coord._ble_devices[DEV], "_write", write)
 
-        assert await coord.async_control_device(DEV, command) is True
+        if isinstance(command, ToggleCommand):
+            assert await coord.async_send_dreamview(DEV, command.enabled) is True
+        else:
+            assert await coord.async_control_device(DEV, command) is True
 
         if head is not None:
             write.assert_awaited_once()

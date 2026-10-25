@@ -955,7 +955,11 @@ class GoveeCoordinator(DataUpdateCoordinator[dict[str, GoveeDeviceState]]):
 
     def _refresh_ble_staleness(self) -> None:
         """Mark BLE unavailable for devices whose last advertisement is stale."""
-        self._transport.refresh_ble_staleness(self._devices, set(self._ble_devices.keys()))
+        self._transport.refresh_ble_staleness(
+            self._devices,
+            set(self._ble_devices.keys()),
+            {did for did, client in self._ble_devices.items() if client.is_connected is True},
+        )
 
     def _refresh_lan_staleness(self) -> None:
         """Mark LAN unavailable for non-LAN or stale-read devices (issue #57).
@@ -5858,6 +5862,10 @@ class GoveeCoordinator(DataUpdateCoordinator[dict[str, GoveeDeviceState]]):
         blindly and never fall through to LAN/MQTT/REST (#198).
         """
         health = self._transport.get(device_id, "ble")
+        if health is not None and health.last_failure_reason == "stale_advertisement":
+            client = self._ble_devices.get(device_id)
+            if client is not None and client.is_connected is True:
+                return True
         return health is not None and health.is_available
 
     async def _try_ble_command(self, device_id: str, command: DeviceCommand) -> bool:
@@ -5886,6 +5894,18 @@ class GoveeCoordinator(DataUpdateCoordinator[dict[str, GoveeDeviceState]]):
                     command.color.g,
                     command.color.b,
                 )
+            elif (
+                isinstance(command, ToggleCommand)
+                and command.toggle_instance == INSTANCE_DREAMVIEW
+                and ble_sku == "H6104"
+            ):
+                if command.enabled:
+                    await ble_device.set_tv_mode()
+                else:
+                    state = self._states.get(device_id)
+                    color = (state.last_color or state.color) if state else None
+                    color = color or RGBColor(255, 255, 255)
+                    await ble_device.set_rgb(color.r, color.g, color.b)
             else:
                 # Not BLE-capable (scenes, color_temp, work modes, etc.)
                 return False
@@ -6089,6 +6109,9 @@ class GoveeCoordinator(DataUpdateCoordinator[dict[str, GoveeDeviceState]]):
         if not device:
             _LOGGER.error("Unknown device for DreamView: %s", device_id)
             return False
+
+        if device.sku == "H6104" and device_id in self._ble_devices:
+            return await self.async_control_device(device_id, create_dreamview_command(enabled))
 
         # Try REST API first (works for HTTP-capable devices like H6097), except
         # on SKUs that accept the toggle and ignore it (issue #213), and except

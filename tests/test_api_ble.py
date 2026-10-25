@@ -609,6 +609,7 @@ class TestLegacyUartTransport:
             await (device.turn_on() if power_on else device.turn_off())
             # Reused connections do not subscribe a second time.
             await device.set_brightness(128)
+            await device.set_tv_mode()
         client.start_notify.assert_awaited_once()
         assert client.start_notify.call_args.args[0] == LEGACY_UART_CHARACTERISTIC_UUID
         client.write_gatt_char.assert_any_await(
@@ -619,6 +620,21 @@ class TestLegacyUartTransport:
         )
         probe.assert_not_awaited()
         client.read_gatt_char.assert_not_called()
+        tv_frame = client.write_gatt_char.call_args.args[1]
+        assert tv_frame[:6] == bytes.fromhex("330500000132")
+        assert len(tv_frame) == 20
+        checksum = 0
+        for value in tv_frame[:-1]:
+            checksum ^= value
+        assert tv_frame[-1] == checksum
+
+    @pytest.mark.asyncio
+    async def test_tv_mode_is_not_sent_to_a_modern_profile(self):
+        device = GoveeBLEDevice(_make_ble_device())
+        with patch.object(device, "_write", AsyncMock()) as write:
+            with pytest.raises(BleakError, match="H6104"):
+                await device.set_tv_mode()
+        write.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_failed_notification_setup_disconnects_without_sending(self):

@@ -207,8 +207,18 @@ It enables notifications on `FFE1` and skips the modern encryption-version probe
 the similarly named `2b12` characteristic on this H6104 belongs to its OTA service.
 Discovery has been observed, but **command operation is not hardware-verified**.
 H6104 is deliberately absent from the automatically enabled, verified model list.
-Color temperature, effects, camera/video modes and calibration remain on the
-existing Wi-Fi/cloud paths; this is not a complete offline integration.
+The H6104 **DreamView** switch selects TV/camera mode directly over BLE (whole
+screen, sensitivity 50). Turn the light on first, then turn this switch on.
+Turning it off restores a solid color. This H6104 frame is app-derived and still
+requires physical verification. Color temperature, other effects and camera
+calibration remain on the existing Wi-Fi/cloud paths.
+
+A live GATT connection stays available even when the light stops advertising.
+Disconnected devices still require fresh advertisements, and real write errors
+still make BLE unavailable. This avoids the previous three-minute
+`stale_advertisement` cutoff without treating unacknowledged writes as received
+packets. After installing this build, restart HA and test controls after both
+several minutes idle and repeated mode/power changes.
 
 To verify on your unit, enable the transport diagnostic entities, then check
 power on/off, several brightness levels and red/green/blue with the light's

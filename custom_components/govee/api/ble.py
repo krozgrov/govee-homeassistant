@@ -297,6 +297,11 @@ class GoveeBLEDevice:
         return self._state
 
     @property
+    def is_connected(self) -> bool:
+        """Whether the current GATT connection is still live."""
+        return self._client is not None and bool(self._client.is_connected)
+
+    @property
     def segmented(self) -> bool:
         """Whether the device uses segmented color encoding."""
         return self._segmented
@@ -475,6 +480,16 @@ class GoveeBLEDevice:
         await self._write(_build_brightness_frame(value))
         self._state.brightness = value
         self._emit()
+
+    async def set_tv_mode(self) -> None:
+        """Select H6104 video mode, whole screen, sensitivity 50.
+
+        App-derived SubModeVideo layout: 33 05 00 00 area sensitivity.
+        https://github.com/Brady-Woods/govee-ble-local/blob/535104e8e107b35757e6f90d8bbb2cadf599985c/spec/docs/OPCODE_COVERAGE.md
+        """
+        if not self._legacy_uart:
+            raise BleakError("TV mode is only implemented for the H6104 UART profile")
+        await self._write(_build_frame(LedPacketCmd.COLOR, [0x00, 0x00, 0x01, 50]))
 
     async def set_rgb(self, red: int, green: int, blue: int) -> None:
         """Set RGB color.
