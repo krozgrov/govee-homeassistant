@@ -46,6 +46,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import IntEnum
@@ -65,6 +66,7 @@ from .ble_crypto import (
     async_supports_encryption,
 )
 from .ble_packet import build_packet
+from .ble_status import H6104Report, decode_h6104_status
 
 if TYPE_CHECKING:
     from bleak.backends.device import BLEDevice
@@ -118,6 +120,7 @@ _PACKET_HEAD_COMMAND = 0x33
 # Connection management
 _MAX_CONNECT_ATTEMPTS = 4
 _LEGACY_IDLE_DISCONNECT_SECONDS = 5.0
+_STATUS_REPLY_TIMEOUT = 0.5
 
 
 class LedPacketCmd(IntEnum):
@@ -148,10 +151,10 @@ class LedColorMode(IntEnum):
 class GoveeBLEState:
     """Snapshot of the last-known state of a Govee BLE light.
 
-    Govee BLE lights do not reliably push state updates over GATT notifications,
-    so this snapshot is maintained optimistically from the commands we send.
-    The coordinator's ``update()`` call is effectively a keep-alive — it does
-    not round-trip state over GATT (see module docstring).
+    This compatibility snapshot is maintained optimistically from commands.
+    H6104 device-reported values travel separately through H6104Report callbacks
+    and async_read_status(), so a cached desired value cannot masquerade as a
+    received status report. Modern models retain the existing optimistic path.
     """
 
     power: bool | None = None
@@ -279,6 +282,12 @@ class GoveeBLEDevice:
         self._idle_disconnect_handle: asyncio.TimerHandle | None = None
         self._connection_generation = 0
         self._idle_disconnected = False
+        self._report_callbacks: list[Callable[[H6104Report], None]] = []
+        self._pending_status: tuple[bytes, asyncio.Future[H6104Report]] | None = None
+        self._power_read_validated = False
+        self._status_frames: deque[str] = deque(maxlen=12)
+        self._status_candidates: deque[str] = deque(maxlen=12)
+        self._status_results: dict[str, str] = {}
         self._callbacks: list[Callable[[GoveeBLEState], None]] = []
 
     # ------------------------------------------------------------------ #
@@ -309,6 +318,99 @@ class GoveeBLEDevice:
     def idle_disconnected(self) -> bool:
         """The last link was deliberately released, rather than lost or failed."""
         return self._idle_disconnected
+
+    @property
+    def supports_readback(self) -> bool:
+        return self._legacy_uart
+
+    @property
+    def readback_diagnostics(self) -> dict[str, object]:
+        """Known status frames only; never device-info or pairing payloads."""
+        return {
+            "power_read_validated": self._power_read_validated,
+            "last_queries": dict(self._status_results),
+            "recent_status_frames": list(self._status_frames),
+            "recent_status_candidates": list(self._status_candidates),
+        }
+
+    def register_report_callback(self, callback: Callable[[H6104Report], None]) -> None:
+        """Receive device reports separately from optimistic state callbacks."""
+        self._report_callbacks.append(callback)
+
+    def _emit_report(self, report: H6104Report) -> None:
+        for callback in self._report_callbacks:
+            try:
+                callback(report)
+            except Exception:
+                _LOGGER.exception("Error applying H6104 status report")
+
+    def _on_uart_notification(self, client: BleakClient, data: bytearray) -> None:
+        """Ignore late connections, echoes, bad checksums and unrelated frames."""
+        if client is not self._client:
+            return
+        frame = bytes(data)
+        if len(frame) != 20:
+            return
+        if (frame[0] == 0xAA and frame[1] in (1, 4, 5)) or frame[:2] == bytes([0xEE, 0x20]):
+            # Keep bounded evidence even for echoes/unknown layouts, while
+            # excluding device-info, Wi-Fi/pairing and arbitrary notifications.
+            # A candidate is diagnostic evidence, not decoded/accepted state.
+            self._status_candidates.append(frame.hex())
+        pending = self._pending_status
+        if frame[0] == 0xAA:
+            if pending is None or pending[1].done() or frame[1] != pending[0][1]:
+                return
+            query = pending[0]
+        elif frame[:2] == bytes([0xEE, 0x20]):
+            query = None
+        else:
+            return
+        report = decode_h6104_status(frame, query=query, power_read_validated=self._power_read_validated)
+        if report is None:
+            return
+        self._status_frames.append(frame.hex())
+        if report.power is True:
+            self._power_read_validated = True
+        if frame[0] == 0xAA and pending is not None:
+            pending[1].set_result(report)
+        else:
+            self._emit_report(report)
+
+    async def async_read_status(self) -> list[H6104Report]:
+        """Read power, raw brightness and mode without changing the light.
+
+        A timeout is missing data, never a negative state or a failed control
+        command. Each reply is bounded; unsupported reads do not hold a slot.
+        """
+        if not self._legacy_uart:
+            return []
+        reports: list[H6104Report] = []
+        async with self._lock:
+            self._cancel_idle_disconnect()
+            self._idle_disconnected = False
+            try:
+                client = await self._ensure_connected()
+                for command, payload in ((1, []), (4, []), (5, [1])):
+                    query = build_packet([0xAA, command, *payload])
+                    future: asyncio.Future[H6104Report] = asyncio.get_running_loop().create_future()
+                    self._pending_status = (query, future)
+                    try:
+                        await client.write_gatt_char(self._write_uuid, query, response=False)
+                        report = await asyncio.wait_for(future, _STATUS_REPLY_TIMEOUT)
+                        reports.append(report)
+                        self._status_results[f"aa{command:02x}"] = "reply"
+                        self._emit_report(report)
+                    except TimeoutError:
+                        self._status_results[f"aa{command:02x}"] = "timeout_or_echo"
+                    finally:
+                        if not future.done():
+                            future.cancel()
+                        elif not future.cancelled():
+                            future.exception()  # retrieve if disconnect and write both failed
+                        self._pending_status = None
+            finally:
+                self._schedule_idle_disconnect()
+        return reports
 
     @property
     def segmented(self) -> bool:
@@ -370,6 +472,8 @@ class GoveeBLEDevice:
             return
         self._cancel_idle_disconnect()
         self._idle_disconnected = False
+        if self._pending_status is not None and not self._pending_status[1].done():
+            self._pending_status[1].set_exception(BleakError("Disconnected during status read"))
         self._client = None
         # Frame counters restart at 1 on the next connection, so reusing this
         # session would encrypt with nonces the device has already seen.
@@ -462,10 +566,13 @@ class GoveeBLEDevice:
             if self._legacy_uart:
                 # On H6104 the 2b12 characteristic belongs to OTA service 1912,
                 # not control service 1910: it is not encryption-version data.
-                # Subscribe on the UART as the app does, retaining optimistic
-                # state until the notification format has been verified.
+                # Subscribe on the UART as the app does. Only validated status
+                # replies/known notifications reach the separate report path.
                 if self._client.services.get_characteristic(self._write_uuid) is not None:
-                    await self._client.start_notify(self._write_uuid, lambda _sender, _data: None)
+                    client = self._client
+                    await client.start_notify(
+                        self._write_uuid, lambda _sender, data: self._on_uart_notification(client, data)
+                    )
             elif await async_supports_encryption(self._client):
                 self._session = await async_establish_session(
                     self._client, WRITE_CHARACTERISTIC_UUID, READ_CHARACTERISTIC_UUID
@@ -613,3 +720,4 @@ class GoveeBLEDevice:
             self._cancel_idle_disconnect()
             self._idle_disconnected = False
             await self._disconnect_client()
+            self._report_callbacks.clear()

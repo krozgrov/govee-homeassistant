@@ -39,6 +39,7 @@ from .api import (
     GoveeIotCredentials,
     GoveeRateLimitError,
 )
+from .api.ble_status import H6104Report
 from .api.auth import GoveeAuthClient, _derive_client_id
 from .api.openapi_events import GoveeOpenApiEventClient
 from .ble_passthrough import BlePassthroughManager
@@ -439,6 +440,9 @@ class GoveeCoordinator(DataUpdateCoordinator[dict[str, GoveeDeviceState]]):
         self._config_entry = config_entry
         self._h6104_tv_settings: dict[str, tuple[int, int]] = {}
         self._h6104_tv_settings_locks: dict[str, asyncio.Lock] = {}
+        self._h6104_ble_fields: dict[str, dict[str, tuple[Any, datetime]]] = {}
+        self._h6104_last_write: dict[str, datetime] = {}
+        self._h6104_last_query: dict[str, float] = {}
         # The options this instance was built with. The entry's update listener
         # compares against this to tell an options change from a data-only
         # write, such as storing a refreshed account token (#132) — reloading
@@ -3809,6 +3813,14 @@ class GoveeCoordinator(DataUpdateCoordinator[dict[str, GoveeDeviceState]]):
                 device.name if device else device_id,
             )
 
+        if device is not None and device.sku == "H6104":
+            # Newer device pushes win for fields they actually changed; keep
+            # BLE-only mode fields absent from this MQTT report.
+            fields = self._h6104_ble_fields.get(device_id, {})
+            for field in list(fields):
+                if getattr(state, field) != getattr(before, field):
+                    fields.pop(field)
+
         # Confirmed push — record transport health and end the optimistic
         # grace window for this device (state.update_from_mqtt also calls
         # clear_optimistic_window, but recording MQTT health is our job).
@@ -4186,6 +4198,12 @@ class GoveeCoordinator(DataUpdateCoordinator[dict[str, GoveeDeviceState]]):
         skipped = len(self._devices) - len(pollable)
         if skipped:
             _LOGGER.debug("Skipping %d device(s) with all entities disabled", skipped)
+
+        # Local readback must still run when REST is skipped for budget or
+        # MQTT freshness. The fetch helper throttles duplicate UART queries.
+        await asyncio.gather(
+            *(self._async_refresh_h6104_ble_status(did) for did, dev in pollable.items() if dev.sku == "H6104")
+        )
 
         # Devices a local transport has already reported on more recently than
         # one poll interval need no cloud read this cycle (see
@@ -4743,6 +4761,7 @@ class GoveeCoordinator(DataUpdateCoordinator[dict[str, GoveeDeviceState]]):
             self._mark_cached_result(device_id)
             return self._states.get(device_id) or GoveeDeviceState.create_empty(device_id)
 
+        await self._async_refresh_h6104_ble_status(device_id)
         try:
             state = await self._api_client.get_device_state(device_id, device.sku)
             self._record_transport_success(device_id, "cloud_api")
@@ -4922,6 +4941,7 @@ class GoveeCoordinator(DataUpdateCoordinator[dict[str, GoveeDeviceState]]):
                             device_id,
                         )
 
+            self._merge_h6104_ble_fields(device_id, state)
             return state
 
         except GoveeDeviceNotFoundError:
@@ -4961,6 +4981,12 @@ class GoveeCoordinator(DataUpdateCoordinator[dict[str, GoveeDeviceState]]):
 
         except Exception as err:
             self._record_transport_failure(device_id, "cloud_api", str(err))
+            existing = self._states.get(device_id)
+            if device.sku == "H6104" and existing is not None:
+                refreshed = dataclasses.replace(existing)
+                if self._merge_h6104_ble_fields(device_id, refreshed):
+                    self._mark_cached_result(device_id)
+                    return refreshed
             return err
 
     def _raw_power_switch_value(self, device_id: str) -> Any:
@@ -5310,8 +5336,11 @@ class GoveeCoordinator(DataUpdateCoordinator[dict[str, GoveeDeviceState]]):
             # (~50ms local vs ~500ms cloud) and works when internet is down.
             if HAS_BLUETOOTH and device_id in self._ble_devices and self._ble_write_eligible(device_id):
                 if await self._try_ble_command(device_id, command):
+                    if device.sku == "H6104":
+                        self._h6104_last_write[device_id] = dt_util.utcnow()
                     self._apply_optimistic_update(device_id, command)
                     self.async_set_updated_data(self._states)
+                    await self._async_refresh_h6104_ble_status(device_id, force=True)
                     return True
                 # BLE failed — fall through to LAN/MQTT/REST
 
@@ -5874,6 +5903,91 @@ class GoveeCoordinator(DataUpdateCoordinator[dict[str, GoveeDeviceState]]):
         self._record_local_command(device_id, sku, "mqtt", command, delivered=True)
         return True
 
+    def _apply_h6104_ble_report(self, device_id: str, report: H6104Report) -> None:
+        """Apply received fields, never values inferred from a sent command."""
+        device = self._devices.get(device_id)
+        existing = self._states.get(device_id)
+        if device is None or device.sku != "H6104" or existing is None:
+            return
+        updates: dict[str, Any] = {"online": True}
+        if report.power is not None:
+            updates["power_state"] = report.power
+        if report.brightness is not None:
+            maximum = device.brightness_range[1]
+            updates["brightness"] = max(0, min(maximum, round(report.brightness * maximum / 254)))
+        if report.mode is not None:
+            updates.update(
+                dreamview_enabled=report.mode == "tv",
+                music_mode_enabled=report.mode == "music",
+            )
+            if report.mode != "music":
+                updates.update(music_mode_value=None, music_mode_name=None)
+            if report.mode in ("tv", "music", "scene", "diy", "color_temp"):
+                updates.update(color=None, color_temp_kelvin=None)
+            if report.mode not in ("scene", "diy"):
+                updates.update(active_scene=None, active_scene_name=None, active_diy_scene=None)
+            if report.mode == "music":
+                api_mode = (
+                    {0: 5, 1: 6, 2: 4, 3: 3}.get(report.music_effect) if report.music_effect is not None else None
+                )
+                name = next(
+                    (opt.get("name") for opt in device.get_music_mode_options() if opt.get("value") == api_mode), None
+                )
+                updates.update(music_mode_value=api_mode, music_mode_name=name)
+                if report.sensitivity is not None:
+                    updates["music_sensitivity"] = report.sensitivity
+        if report.rgb is not None:
+            updates.update(color=RGBColor(*report.rgb), color_temp_kelvin=None)
+        now = dt_util.utcnow()
+        self._h6104_ble_fields.setdefault(device_id, {}).update({key: (value, now) for key, value in updates.items()})
+        refreshed = dataclasses.replace(existing, **updates)
+        if report.power is not None:
+            refreshed.source = "ble"
+            refreshed.clear_optimistic_window()
+        elif existing.source != "optimistic":
+            refreshed.source = "ble"
+        self._states[device_id] = refreshed
+        self._transport.record_read(device_id, "ble")
+        if self.data is not None:
+            self.async_update_listeners()
+
+    def _merge_h6104_ble_fields(self, device_id: str, state: GoveeDeviceState) -> bool:
+        """Keep fresh received fields over a lagging cloud read, field by field."""
+        device = self._devices.get(device_id)
+        if device is None or device.sku != "H6104":
+            return False
+        now = dt_util.utcnow()
+        last_write = self._h6104_last_write.get(device_id)
+        applied = False
+        for field, (value, received) in self._h6104_ble_fields.get(device_id, {}).items():
+            if (now - received).total_seconds() > 120 or (last_write is not None and received < last_write):
+                continue
+            setattr(state, field, value)
+            applied = True
+        if applied:
+            state.source = "ble"
+        return applied
+
+    async def _async_refresh_h6104_ble_status(self, device_id: str, *, force: bool = False) -> None:
+        """Best-effort status reads on commands and the existing poll cadence."""
+        device = self._devices.get(device_id)
+        if device is None or device.sku != "H6104":
+            return
+        client = self._ble_devices.get(device_id)
+        if client is None or client.supports_readback is not True or not self._ble_write_eligible(device_id):
+            return
+        now = time.monotonic()
+        previous = self._h6104_last_query.get(device_id)
+        if not force and previous is not None and now - previous < 2:
+            return
+        self._h6104_last_query[device_id] = now
+        try:
+            async with asyncio.timeout(5):
+                await client.async_read_status()
+        except Exception as err:
+            self._record_transport_failure(device_id, "ble", str(err))
+            _LOGGER.debug("H6104 status read failed for %s: %s", device_id, err)
+
     def _h6104_idle_reconnect_eligible(self, device_id: str) -> bool:
         """Allow a connection attempt after our own idle release, not a failed link.
 
@@ -5930,7 +6044,10 @@ class GoveeCoordinator(DataUpdateCoordinator[dict[str, GoveeDeviceState]]):
                 else:
                     await ble_device.turn_off()
             elif isinstance(command, BrightnessCommand):
-                await ble_device.set_brightness(command.brightness)
+                brightness = command.brightness
+                if ble_sku == "H6104" and device is not None:
+                    brightness = max(20, min(254, round(brightness * 254 / max(1, device.brightness_range[1]))))
+                await ble_device.set_brightness(brightness)
             elif isinstance(command, ColorCommand):
                 await ble_device.set_rgb(
                     command.color.r,

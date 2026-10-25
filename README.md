@@ -265,8 +265,42 @@ clears that idle allowance; a real connection/write failure retains the usual
 failure gate until fresh discovery. This also keeps controls actionable when
 the cloud reports the light offline. H6104 DreamView never falls back to the
 unsupported cloud `dreamViewToggle`: a local failure reports the BLE reason.
-This test build is identified by `h6104_ble_build: 2026.10.25.9` in downloaded
+This test build is identified by `h6104_ble_build: 2026.10.25.10` in downloaded
 diagnostics, to distinguish packages that share the upstream manifest version.
+
+### H6104 Bluetooth status readback (experimental)
+
+The UART subscription now decodes known replies to `AA 01` (power), `AA 04`
+(brightness), and `AA 05 01` (mode/color), plus `EE 20` brightness notifications.
+Reads run after BLE commands and on the configured integration poll cadence,
+including when cloud requests are skipped. Each reply has a 0.5-second deadline;
+an entire connection/read attempt is bounded to five seconds. The normal idle
+disconnect still releases the proxy slot. App/button changes made while the link
+is idle become visible on the next successful poll, not instantly.
+
+Only checksummed 20-byte known replies update HA. Write acknowledgements,
+unrelated packets and request echoes are ignored. An all-zero power-OFF reply
+is identical to a request echo, so it is not authoritative until this running
+instance has received a non-echo ON reply. This is intentionally conservative;
+HA commands still provide immediate optimistic state when readback is missing.
+Unknown modes/effects are not presented as a confirmed named effect, and CCT
+tint bytes are not converted into a guessed Kelvin value.
+
+Fresh reported fields override stale cloud values for up to 120 seconds, with
+per-field timestamps so a pre-command reading cannot undo a newer command.
+New device pushes retain precedence for fields they actually change. H6104
+brightness writes and replies are scaled between its raw 0–254 range and the
+API/HA device percentage; nonzero writes respect the documented minimum of 20.
+Other models retain their existing transport and status behavior.
+
+After installing, test ON then OFF, brightness levels, RGB, music and DreamView,
+then an app/button change with the Govee app closed before the next HA poll.
+Downloaded device diagnostics include `ble_readback.last_queries`,
+`power_read_validated`, accepted status frames, and separate status candidates
+(including ignored echoes/unknown layouts) for firmware diagnosis. No device-info,
+pairing or arbitrary notification payloads are included. These decoders and
+queries are app-derived and locally tested, **not yet verified on this H6104's
+firmware**; timeouts keep existing state rather than inventing a device reply.
 
 To verify on your unit, enable the transport diagnostic entities, then check
 power on/off, several brightness levels and red/green/blue with the light's

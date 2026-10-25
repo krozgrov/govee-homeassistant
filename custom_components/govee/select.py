@@ -698,10 +698,14 @@ class GoveeMusicModeSelectEntity(_GoveeSelectBase):
     def current_option(self) -> str | None:
         """Return current selected option from state."""
         state = self.coordinator.get_state(self._device_id)
+        if self._device.sku == "H6104" and (state is None or state.music_mode_enabled is not True):
+            return None
         if state and state.music_mode_name is not None:
             # Check if the name is in our options
             if state.music_mode_name in self._option_map:
                 return state.music_mode_name
+        if self._device.sku == "H6104":
+            return None
         # Return first option as default if available
         return self._attr_options[0] if self._attr_options else None
 

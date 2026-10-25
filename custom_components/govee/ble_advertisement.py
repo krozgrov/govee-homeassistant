@@ -260,11 +260,11 @@ class BleAdvertisementHandler:
             )
             changed = True
             if ble_sku == "H6104":
-                _LOGGER.warning(
-                    "Experimental H6104 BLE control enabled for %s. Power, brightness "
-                    "and RGB use unverified command frames; a successful write does "
-                    "not confirm the light acted. Disable the H6104 BLE option if "
-                    "commands are ignored or behave unexpectedly.",
+                coord._ble_devices[matched_id].register_report_callback(
+                    lambda report, did=matched_id: coord._apply_h6104_ble_report(did, report)
+                )
+                _LOGGER.info(
+                    "H6104 BLE control and experimental status readback enabled for %s",
                     coord._devices[matched_id].name,
                 )
             _LOGGER.info(

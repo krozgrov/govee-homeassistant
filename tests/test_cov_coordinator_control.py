@@ -70,6 +70,13 @@ from custom_components.govee.models.device import (
 DEV = "AA:BB:CC:DD:EE:FF:00:11"
 IP = "10.0.0.5"
 
+
+@pytest.fixture(autouse=True)
+def _mock_h6104_status_queries(monkeypatch):
+    """These routing tests mock writes; readback has dedicated reply tests."""
+    monkeypatch.setattr(GoveeBLEDevice, "async_read_status", AsyncMock(return_value=[]))
+
+
 CREDS = GoveeIotCredentials(
     token="tok",
     refresh_token="r",
@@ -524,7 +531,7 @@ class TestH6104BleTier:
         [
             (PowerCommand(power_on=True), bytes.fromhex("330101")),
             (PowerCommand(power_on=False), bytes.fromhex("330100")),
-            (BrightnessCommand(brightness=128), bytes.fromhex("330480")),
+            (BrightnessCommand(brightness=50), bytes.fromhex("33047f")),
             (ColorCommand(color=RGBColor(r=255, g=0, b=64)), bytes.fromhex("330502ff0040")),
             (ColorTempCommand(kelvin=3000), None),
             (MusicModeCommand(music_mode=5, sensitivity=80), bytes.fromhex("3305010050")),

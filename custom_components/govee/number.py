@@ -198,6 +198,15 @@ class GoveeMusicSensitivityNumber(GoveeEntity, RestoreEntity, NumberEntity):
         # Unique ID
         self._attr_unique_id = f"{device.device_id}{SUFFIX_MUSIC_SENSITIVITY}"
 
+    @property
+    def native_value(self) -> float | None:
+        """Prefer H6104 device-reported music sensitivity when available."""
+        if self._device.sku == "H6104":
+            state = self.coordinator.get_state(self._device_id)
+            if state is not None and state.music_sensitivity is not None:
+                return float(state.music_sensitivity)
+        return self._attr_native_value
+
     async def async_added_to_hass(self) -> None:
         """Restore state when entity is added to Home Assistant."""
         await super().async_added_to_hass()

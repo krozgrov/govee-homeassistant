@@ -3,7 +3,7 @@
 from typing import Final
 
 DOMAIN: Final = "govee"
-H6104_BLE_BUILD: Final = "2026.10.25.9"
+H6104_BLE_BUILD: Final = "2026.10.25.10"
 
 # Config entry keys
 CONF_API_KEY: Final = "api_key"
