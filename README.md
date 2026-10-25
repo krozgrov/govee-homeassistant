@@ -181,6 +181,15 @@ This matters beyond speed: Govee's cloud sometimes answers a color command with 
 
 ### Experimental H6104 TV backlight Bluetooth control (this fork)
 
+For this experimental branch, download the test component package supplied with
+the change, back up your current `/config/custom_components/govee` directory,
+then extract the package's `govee` directory into `/config/custom_components/`,
+replacing the existing component. Restart Home Assistant. Install only one copy
+of the `govee` integration; this replaces the upstream component rather than
+adding a second integration. To roll back, restore your backup and restart HA.
+The fork's default branch and upstream HACS release do not include this draft
+change; installing either of those will not expose the experimental option.
+
 Under **Settings → Devices & services → Govee → Configure → General**, enable
 **Enable experimental H6104 Bluetooth control**. Saving options reloads the
 integration. Leave Home Assistant's Bluetooth integration enabled and use a
